@@ -19,6 +19,7 @@ from app.core.database import (
 from app.core.redis import get_redis, check_redis_health, close_redis
 from app.models.worker import WorkerNode, WorkerStatus, utcnow
 from app.scheduler.priority_queue import PriorityQueue
+from app.scheduler.heartbeat import HeartbeatManager
 from app.worker.executor import JobExecutor
 import app.tasks  # registers workloads
 
@@ -38,6 +39,7 @@ class WorkerProcess:
         self.is_running = False
         self._shutdown_event = asyncio.Event()
         self._active_tasks: Set[asyncio.Task] = set()
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._semaphore = asyncio.Semaphore(self.concurrency)
         self._running_jobs_count = 0
 
@@ -91,6 +93,35 @@ class WorkerProcess:
             logger.info("Redis connection established.")
 
         await self.register()
+
+    async def send_heartbeat(self) -> None:
+        """Sends a single heartbeat update."""
+        redis = await get_redis()
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await HeartbeatManager.record_heartbeat(
+                redis=redis,
+                session=session,
+                worker_id=self.worker_id,
+                cpu_percent=round(psutil.cpu_percent(interval=None), 1),
+                memory_percent=round(psutil.virtual_memory().percent, 1),
+                running_jobs_count=self._running_jobs_count,
+            )
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodic background heartbeat emitter."""
+        while not self._shutdown_event.is_set():
+            try:
+                await self.send_heartbeat()
+            except Exception as exc:
+                logger.warning(f"Worker [{self.worker_id}] heartbeat failed: {exc}")
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=self.settings.WORKER_HEARTBEAT_INTERVAL,
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def process_next_job(self, timeout: int = 1) -> bool:
         """Atomically pulls and executes one job using Redis Lua script.
@@ -147,6 +178,7 @@ class WorkerProcess:
     async def start(self) -> None:
         await self.initialize()
         self.is_running = True
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info(f"Worker [{self.worker_id}] running and listening for priority jobs...")
 
         try:
@@ -159,6 +191,13 @@ class WorkerProcess:
     async def shutdown(self) -> None:
         logger.info(f"Shutting down worker [{self.worker_id}]...")
         self.is_running = False
+
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         # Wait for in-flight tasks to complete
         if self._active_tasks:

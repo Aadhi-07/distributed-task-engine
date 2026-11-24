@@ -133,3 +133,25 @@ When a task raises an unhandled exception or times out:
   - Checks if job has already reached a terminal state (`SUCCEEDED`, `FAILED`, `CANCELLED`, `DEAD`). If so, returns HTTP 409 Conflict.
   - If `QUEUED`: atomically removes the job from `task_engine:queue:priority` and transitions DB status to `CANCELLED`.
   - If `RUNNING`: sets a Redis cancellation flag (`task_engine:cancel:<id>`) and marks status as `CANCELLED`. Worker detects this flag upon task completion or during execution loops and drops execution gracefully.
+
+## 6. Phase 5 Design Decisions: Heartbeats, Dead Worker Detection & At-Least-Once Delivery
+
+### 6.1 Dual-Tier Heartbeat Tracking
+Workers emit heartbeats every `WORKER_HEARTBEAT_INTERVAL` seconds (default 5s):
+1. **Redis ZSET (`task_engine:workers:heartbeats`)**:
+   - Member: `worker_id`, Score: `epoch_seconds`. Enables $O(\log N)$ range queries for expired worker nodes.
+2. **PostgreSQL (`WorkerNode`)**:
+   - Tracks `last_heartbeat_at`, `cpu_percent`, `memory_percent`, `running_jobs_count`, and `status`.
+
+### 6.2 Dead Worker Detection & Requeue Algorithm
+A background detector runs periodically to evaluate nodes against `WORKER_DEAD_THRESHOLD` (15s):
+1. **Node Transition**: Workers with `now - last_heartbeat > threshold` are marked `DEAD`.
+2. **Stranded In-Flight Job Recovery**:
+   - For every job in status `RUNNING` assigned to the dead worker:
+     - Transactionally claims the job via `SELECT ... FOR UPDATE`.
+     - Logs a failed attempt in `job_attempts` documenting the crash.
+     - **At-Least-Once Guarantee**: If `retry_count < max_retries`, increments `retry_count`, resets status to `QUEUED`, clears `worker_id`, and pushes back into the Redis priority queue.
+     - If retries exhausted: transitions status to `DEAD` and sends to `task_engine:queue:dlq`.
+     - Clears the in-flight Redis entry `task_engine:processing`.
+3. **Idempotency Safeguard**:
+   - Jobs maintain unique `idempotency_key` constraints. Even when a dead worker's in-flight task is requeued and picked up by a new worker, the idempotency key prevents duplicate side-effects.
