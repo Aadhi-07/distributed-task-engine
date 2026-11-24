@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DISTASKENG // Real-Time Topology Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <!-- Pinned D3 v7 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+</head>
+<body>
+  <!-- Top Navigation & Metrics Bar -->
+  <header id="top-bar">
+    <div class="brand-section">
+      <div class="brand-icon">
+        <span class="pulse-indicator" id="conn-indicator" title="Connected"></span>
+      </div>
+      <div class="brand-text">
+        <span class="brand-title">DISTASKENG</span>
+        <span class="brand-subtitle">TOPOLOGY GRAPH</span>
+      </div>
+    </div>
+
+    <div class="metrics-strip">
+      <div class="metric-card" id="card-queue">
+        <span class="metric-label">QUEUE DEPTH</span>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-queue-depth">0</span>
+          <span class="metric-sub" id="val-queue-breakdown">0 prio &bull; 0 dlq</span>
+        </div>
+      </div>
+
+      <div class="metric-divider"></div>
+
+      <div class="metric-card" id="card-throughput">
+        <span class="metric-label">THROUGHPUT</span>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-throughput">0.0</span>
+          <span class="metric-unit">jobs/s</span>
+        </div>
+      </div>
+
+      <div class="metric-divider"></div>
+
+      <div class="metric-card" id="card-latency">
+        <span class="metric-label">LATENCY (P50 / P95 / P99)</span>
+        <div class="metric-value-row">
+          <span class="metric-value mono" id="val-latency">0 / 0 / 0</span>
+          <span class="metric-unit">ms</span>
+        </div>
+      </div>
+
+      <div class="metric-divider"></div>
+
+      <div class="metric-card" id="card-failure">
+        <span class="metric-label">FAILURE RATE</span>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-failure-rate">0.0%</span>
+        </div>
+      </div>
+
+      <div class="metric-divider"></div>
+
+      <div class="metric-card" id="card-workers">
+        <span class="metric-label">WORKERS</span>
+        <div class="metric-value-row">
+          <span class="metric-value text-accent-cyan" id="val-active-workers">0</span>
+          <span class="metric-unit" id="val-total-workers">/ 0 alive</span>
+        </div>
+      </div>
+
+      <div class="metric-divider"></div>
+
+      <div class="metric-card" id="card-rendered">
+        <span class="metric-label">VISIBLE NODES</span>
+        <div class="metric-value-row">
+          <span class="metric-value mono" id="val-visible-nodes">0</span>
+          <span class="metric-unit">/ 300 max</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sync-status">
+      <span class="sync-tag" id="sync-tag">POLLING (1s)</span>
+      <span class="sync-time mono" id="sync-time">--:--:--</span>
+    </div>
+  </header>
+
+  <!-- Control & Filter Toolbar -->
+  <div id="toolbar">
+    <div class="filter-group">
+      <span class="filter-label">STATUS:</span>
+      <div class="pill-group" id="status-pills">
+        <button class="pill active" data-status="ALL">ALL</button>
+        <button class="pill" data-status="QUEUED"><span class="dot dot-queued"></span>QUEUED</button>
+        <button class="pill" data-status="RUNNING"><span class="dot dot-running"></span>RUNNING</button>
+        <button class="pill" data-status="SUCCEEDED"><span class="dot dot-succeeded"></span>SUCCEEDED</button>
+        <button class="pill" data-status="FAILED"><span class="dot dot-failed"></span>FAILED</button>
+        <button class="pill" data-status="DEAD"><span class="dot dot-dead"></span>DEAD</button>
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <span class="filter-label">JOB TYPE:</span>
+      <select id="type-select" class="dark-select">
+        <option value="ALL">ALL TYPES</option>
+      </select>
+    </div>
+
+    <div class="filter-group">
+      <span class="filter-label">MIN PRIO:</span>
+      <select id="priority-select" class="dark-select">
+        <option value="ALL">ALL (0-9)</option>
+        <option value="3">&ge; 3</option>
+        <option value="5">&ge; 5</option>
+        <option value="7">&ge; 7 (HIGH)</option>
+        <option value="9">9 (MAX)</option>
+      </select>
+    </div>
+
+    <div class="search-box">
+      <svg class="search-icon" viewBox="0 0 20 20" fill="currentColor">
+        <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/>
+      </svg>
+      <input type="text" id="search-input" placeholder="Search job ID, worker ID, or error..." class="dark-input" />
+      <button id="clear-search" class="clear-btn" title="Clear search">&times;</button>
+    </div>
+
+    <div class="toolbar-actions">
+      <button id="btn-recenter" class="icon-btn" title="Recenter Graph">
+        <svg viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l3.293 3.293a1 1 0 01-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 11-2 0V6.414l-3.293 3.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 9a1 1 0 012 0v1.586l3.293-3.293a1 1 0 011.414 1.414L6.414 15H8a1 1 0 110 2H4a1 1 0 01-1-1v-4zm13-1a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 110-2h1.586l-3.293-3.293a1 1 0 111.414-1.414L15 13.586V12a1 1 0 011-1z" clip-rule="evenodd"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Viewport Area -->
+  <main id="main-viewport">
+    <!-- Graph Canvas Container -->
+    <div id="graph-container">
+      <svg id="graph-svg"></svg>
+
+      <!-- Empty State Banner -->
+      <div id="empty-state" class="empty-state-overlay hidden">
+        <div class="empty-state-box">
+          <div class="empty-radar">
+            <span class="radar-sweep"></span>
+          </div>
+          <h3>QUEUE IDLE</h3>
+          <p>Scheduler waiting for job submissions. Active workers stand by.</p>
+          <div class="empty-code-hint">
+            <code>POST /api/v1/jobs</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Graph Legend -->
+      <div id="graph-legend">
+        <div class="legend-item"><span class="legend-swatch hub-swatch"></span> Queue Hub</div>
+        <div class="legend-item"><span class="legend-swatch worker-swatch"></span> Worker Node</div>
+        <div class="legend-item"><span class="legend-swatch dot-queued"></span> Queued</div>
+        <div class="legend-item"><span class="legend-swatch dot-running"></span> Running</div>
+        <div class="legend-item"><span class="legend-swatch dot-succeeded"></span> Succeeded</div>
+        <div class="legend-item"><span class="legend-swatch dot-failed"></span> Failed</div>
+        <div class="legend-item"><span class="legend-swatch dot-dead"></span> Dead</div>
+        <div class="legend-item"><span class="legend-swatch edge-blocked"></span> Blocked DAG Edge</div>
+      </div>
+    </div>
+
+    <!-- Right Side Detail / Inspector Panel -->
+    <aside id="inspector-panel" class="panel">
+      <div class="panel-header">
+        <div class="panel-title-row">
+          <span class="panel-badge" id="insp-type-badge">SELECTION</span>
+          <span class="panel-status-pill" id="insp-status-pill">NONE</span>
+        </div>
+        <button id="close-inspector" class="close-btn">&times;</button>
+      </div>
+
+      <div class="panel-body" id="inspector-content">
+        <div class="inspector-empty">
+          <svg class="insp-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="9" stroke-width="1.5"/>
+            <path d="M12 8v4M12 16h.01" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <p>Click any node in the topology graph to inspect its state, lifecycle, dependencies, and attempts.</p>
+        </div>
+
+        <div class="inspector-details hidden" id="inspector-fields">
+          <div class="detail-section">
+            <label class="field-label">NODE ID</label>
+            <div class="field-value mono copyable" id="insp-id" title="Click to copy">
+              <span>-</span>
+              <button class="copy-btn" id="btn-copy-id">COPY</button>
+            </div>
+          </div>
+
+          <div class="detail-row">
+            <div class="detail-col">
+              <label class="field-label">JOB TYPE</label>
+              <div class="field-value bold" id="insp-job-type">-</div>
+            </div>
+            <div class="detail-col">
+              <label class="field-label">PRIORITY</label>
+              <div class="field-value mono" id="insp-priority">-</div>
+            </div>
+          </div>
+
+          <div class="detail-row" id="row-worker-info">
+            <div class="detail-col">
+              <label class="field-label">ASSIGNED WORKER</label>
+              <div class="field-value mono" id="insp-worker">-</div>
+            </div>
+            <div class="detail-col">
+              <label class="field-label">EXECUTION TIME</label>
+              <div class="field-value mono" id="insp-duration">-</div>
+            </div>
+          </div>
+
+          <div class="detail-section" id="section-attempts">
+            <label class="field-label">ATTEMPTS (<span id="insp-attempt-count">0</span> / <span id="insp-max-retries">0</span>)</label>
+            <div class="attempts-list" id="insp-attempts-list">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <div class="detail-section" id="section-deps">
+            <label class="field-label">DAG DEPENDENCIES</label>
+            <div class="deps-container" id="insp-deps-container">
+              <div class="dep-subgroup">
+                <span class="dep-subhead">DEPENDS ON (PARENTS):</span>
+                <div class="dep-chips" id="insp-parent-chips">None</div>
+              </div>
+              <div class="dep-subgroup">
+                <span class="dep-subhead">BLOCKING (CHILDREN):</span>
+                <div class="dep-chips" id="insp-child-chips">None</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="detail-section" id="section-result">
+            <label class="field-label">RESULT PAYLOAD</label>
+            <pre class="json-box" id="insp-result-box">null</pre>
+          </div>
+
+          <div class="detail-section hidden" id="section-error">
+            <label class="field-label text-accent-red">ERROR TRACE</label>
+            <pre class="json-box error-box" id="insp-error-box">-</pre>
+          </div>
+
+          <div class="detail-section" id="section-timestamps">
+            <label class="field-label">TIMESTAMPS</label>
+            <div class="timestamp-grid mono">
+              <div>Created:</div><div id="insp-ts-created">-</div>
+              <div>Started:</div><div id="insp-ts-started">-</div>
+              <div>Completed:</div><div id="insp-ts-finished">-</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Bottom Event Stream Panel -->
+  <footer id="event-feed-panel">
+    <div class="feed-header">
+      <div class="feed-title">
+        <span class="terminal-prompt">&gt;</span>
+        <span>EVENT STREAM</span>
+        <span class="feed-badge mono" id="event-count">0 TRANSITIONS</span>
+      </div>
+      <div class="feed-actions">
+        <label class="auto-scroll-label">
+          <input type="checkbox" id="chk-autoscroll" checked> Auto-scroll
+        </label>
+        <button id="btn-clear-feed" class="text-btn">CLEAR</button>
+      </div>
+    </div>
+    <div class="feed-body mono" id="event-feed-list">
+      <div class="feed-empty">Awaiting state transitions...</div>
+    </div>
+  </footer>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

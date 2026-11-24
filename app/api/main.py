@@ -80,6 +80,13 @@ def create_app() -> FastAPI:
     app.include_router(workers_router)
     app.include_router(v1_router, prefix="/api")
 
+    # Mount real-time visual dashboard at /dashboard
+    from pathlib import Path
+    from fastapi.staticfiles import StaticFiles
+    static_dashboard_dir = Path(__file__).resolve().parent.parent / "static" / "dashboard"
+    if static_dashboard_dir.exists():
+        app.mount("/dashboard", StaticFiles(directory=str(static_dashboard_dir), html=True), name="dashboard")
+
     return app
 
 
