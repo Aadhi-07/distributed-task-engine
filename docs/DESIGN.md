@@ -155,3 +155,32 @@ A background detector runs periodically to evaluate nodes against `WORKER_DEAD_T
      - Clears the in-flight Redis entry `task_engine:processing`.
 3. **Idempotency Safeguard**:
    - Jobs maintain unique `idempotency_key` constraints. Even when a dead worker's in-flight task is requeued and picked up by a new worker, the idempotency key prevents duplicate side-effects.
+
+## 7. Phase 6 Design Decisions: Load-Aware Assignment & Concurrency Control
+
+### 7.1 Composite Worker Load Score
+Workers report active system metrics during heartbeat pings:
+- `running_jobs_count`, `concurrency` (max capacity), `cpu_percent`, and `memory_percent`.
+We calculate a normalized composite load score ($0.0$ to $100.0+$):
+$$\text{Load Score} = 0.5 \times \left(\frac{\text{running\_jobs}}{\text{concurrency}} \times 100\right) + 0.3 \times \text{cpu\_percent} + 0.2 \times \text{memory\_percent}$$
+
+- Heaviest weight ($50\%$) is given to job slot saturation (`running / concurrency`), directly reflecting worker capacity.
+- Secondary weights ($30\%$ CPU, $20\%$ RAM) account for system saturation to avoid overloading CPU- or memory-intensive jobs on already burdened physical nodes.
+- Scores are published to a Redis ZSET `task_engine:workers:load` keyed by `worker_id`.
+
+### 7.2 Least-Loaded Worker Targeting & Private Worker Queues
+- When assigning jobs, the scheduler queries `ZRANGEBYSCORE task_engine:workers:load -inf +inf LIMIT 0 1` to find the least loaded active worker.
+- If a target worker is selected, the job is pushed to that worker's private queue `task_engine:worker:queue:<worker_id>`.
+- Workers prioritize their private queue before falling back to the global priority queue, enabling targeted execution without starving general worker pools.
+
+### 7.3 Global Concurrency Limits per Job Type
+- To prevent heavy ML tasks (e.g. `model_training`) from saturating cluster resources, the engine enforces active concurrency caps.
+- Monitored via Redis keys `task_engine:concurrency:active:<job_type>`.
+- When claiming a job, the worker attempts an atomic `INCR` guarded by `acquire_concurrency_slot(...)`. If saturated, the job is deferred (re-queued) without counting against failure retries.
+- On completion (or failure/timeout), `release_concurrency_slot(...)` executes `DECR` to yield the slot.
+
+### 7.4 Sliding Window Rate Limiting (Token / Call Throttling)
+- Implemented using Redis Sorted Sets with a sub-millisecond atomic Lua script.
+- Enforces requests-per-window quotas (e.g. 5 calls per 60s for external APIs or LLM inference endpoints).
+- Members are formatted as `<timestamp>:<seq>` to guarantee element uniqueness within identical microsecond execution intervals.
+

@@ -20,6 +20,7 @@ from app.core.redis import get_redis, check_redis_health, close_redis
 from app.models.worker import WorkerNode, WorkerStatus, utcnow
 from app.scheduler.priority_queue import PriorityQueue
 from app.scheduler.heartbeat import HeartbeatManager
+from app.scheduler.load_balancer import LoadBalancer
 from app.worker.executor import JobExecutor
 import app.tasks  # registers workloads
 
@@ -95,18 +96,31 @@ class WorkerProcess:
         await self.register()
 
     async def send_heartbeat(self) -> None:
-        """Sends a single heartbeat update."""
+        """Sends a single heartbeat update and refreshes load telemetry."""
         redis = await get_redis()
         session_factory = get_session_factory()
+        cpu_val = round(psutil.cpu_percent(interval=None), 1)
+        mem_val = round(psutil.virtual_memory().percent, 1)
+
         async with session_factory() as session:
             await HeartbeatManager.record_heartbeat(
                 redis=redis,
                 session=session,
                 worker_id=self.worker_id,
-                cpu_percent=round(psutil.cpu_percent(interval=None), 1),
-                memory_percent=round(psutil.virtual_memory().percent, 1),
+                cpu_percent=cpu_val,
+                memory_percent=mem_val,
                 running_jobs_count=self._running_jobs_count,
             )
+
+        # Update composite load in Redis
+        lb = LoadBalancer(redis)
+        await lb.update_worker_load(
+            worker_id=self.worker_id,
+            cpu_percent=cpu_val,
+            memory_percent=mem_val,
+            running_jobs=self._running_jobs_count,
+            concurrency=self.concurrency,
+        )
 
     async def _heartbeat_loop(self) -> None:
         """Periodic background heartbeat emitter."""
@@ -124,18 +138,22 @@ class WorkerProcess:
                 pass
 
     async def process_next_job(self, timeout: int = 1) -> bool:
-        """Atomically pulls and executes one job using Redis Lua script.
+        """Pulls and executes one job. Checks private queue first, then priority queue.
         
-        Promotes any ready delayed retry jobs before claiming.
-        Returns True if a job was claimed and executed, False if queue was empty.
+        Returns True if a job was claimed and executed, False if queues were empty.
         """
         redis = await get_redis()
+        lb = LoadBalancer(redis)
         pq = PriorityQueue(redis)
 
-        # Check and promote any due delayed retry jobs
-        await pq.promote_delayed_jobs()
+        # 1. Check targeted private queue first (for load-aware assignments)
+        claimed_id_str = await lb.pop_from_private_queue(self.worker_id)
 
-        claimed_id_str = await pq.atomic_claim(worker_id=self.worker_id)
+        # 2. If no targeted job, check and promote delayed jobs, then claim from priority queue
+        if not claimed_id_str:
+            await pq.promote_delayed_jobs()
+            claimed_id_str = await pq.atomic_claim(worker_id=self.worker_id)
+
         if not claimed_id_str:
             return False
 
@@ -217,6 +235,14 @@ class WorkerProcess:
                     await session.commit()
         except Exception as exc:
             logger.warning(f"Could not update worker stopped status in DB: {exc}")
+
+        # Remove from load balancer registry
+        try:
+            redis = await get_redis()
+            lb = LoadBalancer(redis)
+            await lb.remove_worker(self.worker_id)
+        except Exception:
+            pass
 
         await close_database_connection()
         await close_redis()

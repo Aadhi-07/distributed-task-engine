@@ -13,6 +13,7 @@ from app.models.job import Job, JobAttempt, JobStatus, AttemptStatus, utcnow
 from app.tasks.registry import execute_task
 from app.scheduler.priority_queue import PriorityQueue
 from app.scheduler.retry import calculate_backoff_delay
+from app.scheduler.rate_limiter import RateLimiter
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,6 +31,8 @@ class JobExecutor:
     ) -> bool:
         """Executes a single job with transactional state updates, enforcing timeouts, retries, and DLQ."""
         priority_queue = PriorityQueue(redis)
+        rate_limiter = RateLimiter(redis)
+        concurrency_slot_acquired = False
 
         try:
             # 1. Atomically lock and claim the job record
@@ -58,6 +61,24 @@ class JobExecutor:
                 logger.info(
                     f"Worker [{worker_id}] skipped job [{job_id}]: "
                     f"status is already '{job.status}' (expected QUEUED)."
+                )
+                return False
+
+            # Check global active concurrency limit for this job type
+            concurrency_slot_acquired = await rate_limiter.acquire_concurrency_slot(
+                job_type=job.job_type,
+                job_id=str(job.id),
+            )
+            if not concurrency_slot_acquired:
+                logger.info(
+                    f"Worker [{worker_id}] deferred job [{job.id}] (type: {job.job_type}): "
+                    f"global concurrency quota saturated."
+                )
+                # Reschedule job back into delayed queue with short 0.5s backoff
+                await priority_queue.enqueue_delayed(
+                    job_id=str(job.id),
+                    priority=job.priority,
+                    delay_seconds=0.5,
                 )
                 return False
 
@@ -162,6 +183,12 @@ class JobExecutor:
                 )
 
         finally:
+            if concurrency_slot_acquired and job:
+                try:
+                    await rate_limiter.release_concurrency_slot(job.job_type, str(job.id))
+                except Exception as exc:
+                    logger.warning(f"Failed to release concurrency slot for job [{job_id}]: {exc}")
+
             # Clean up in-flight processing entry from Redis
             try:
                 await priority_queue.complete_processing(str(job_id))
