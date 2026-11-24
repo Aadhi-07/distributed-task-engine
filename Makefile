@@ -32,6 +32,12 @@ migrate:
 test:
 	pytest -v
 
+bench:
+	python benchmarks/load_test_runner.py
+
+locust:
+	locust -f benchmarks/locustfile.py --host http://localhost:8000
+
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete

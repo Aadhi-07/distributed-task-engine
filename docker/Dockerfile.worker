@@ -31,4 +31,4 @@ COPY . /app
 RUN chown -R appuser:appuser /app
 USER appuser
 
-CMD ["python", "-m", "app.worker.main"]
+CMD ["python", "-m", "app.worker"]
