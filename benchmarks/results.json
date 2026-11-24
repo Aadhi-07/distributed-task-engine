@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-24T10:59:17.880730+00:00",
+  "timestamp": "2026-11-24T11:24:10.223309+00:00",
   "total_jobs": 1000,
   "successful_jobs": 1000,
   "failed_jobs": 0,
@@ -7,33 +7,33 @@
   "workers_count": 6,
   "concurrency_per_worker": 4,
   "total_worker_slots": 24,
-  "submission_duration_sec": 39.41,
-  "submission_throughput_rps": 25.4,
-  "execution_duration_sec": 33.58,
-  "processing_throughput_jobs_per_sec": 29.8,
+  "submission_duration_sec": 39.77,
+  "submission_throughput_rps": 25.1,
+  "execution_duration_sec": 23.8,
+  "processing_throughput_jobs_per_sec": 42.0,
   "submission_latency_ms": {
-    "min": 750.0,
-    "p50": 1531.0,
-    "p90": 3422.0,
+    "min": 813.0,
+    "p50": 1547.0,
+    "p90": 3610.6,
     "p95": 4047.75,
-    "p99": 5328.63,
-    "max": 8172.0
+    "p99": 5720.87,
+    "max": 8859.0
   },
   "scheduling_latency_ms": {
-    "min": 743.4,
-    "p50": 29483.42,
-    "p90": 51617.45,
-    "p95": 56074.38,
-    "p99": 62383.8,
-    "max": 65798.08
+    "min": 748.03,
+    "p50": 23666.18,
+    "p90": 45581.38,
+    "p95": 50336.01,
+    "p99": 56515.49,
+    "max": 61976.76
   },
   "execution_duration_ms": {
     "min": 15.0,
-    "p50": 47.0,
-    "p90": 1015.0,
+    "p50": 31.0,
+    "p90": 1000.0,
     "p95": 1031.0,
-    "p99": 1047.0,
-    "max": 1141.0
+    "p99": 1063.0,
+    "max": 1125.0
   },
   "status_breakdown": {
     "SUCCEEDED": 1000
