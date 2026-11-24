@@ -202,4 +202,22 @@ $$\text{Load Score} = 0.5 \times \left(\frac{\text{running\_jobs}}{\text{concurr
 - Downstream jobs immediately transition to `FAILED` with explicit root-cause error diagnostics (`Dependency failure: parent job [...] terminated with status [...]`).
 - Prevents wasted execution cycles and ensures atomic pipeline integrity.
 
+## 9. Phase 8 Design Decisions: Prometheus Metrics & Structured Logging
+
+### 9.1 Prometheus Observability Model
+Exposed via `GET /metrics` and `GET /api/v1/metrics` using `prometheus_client`:
+- **Queue Depths (`task_engine_queue_depth{queue=...}`)**: Sampled directly from Redis sorted sets (`priority`, `delayed`, `dlq`) on scrape.
+- **Active Workers (`task_engine_active_workers_count`)**: Evaluates real-time heartbeats within the healthy threshold window ($< 15\text{s}$).
+- **Throughput & States (`task_engine_jobs_submitted_total`, `task_engine_jobs_completed_total{status=...}`)**: Partitioned by registered `job_type` and terminal status (`SUCCEEDED`, `FAILED`, `TIMED_OUT`, `DEAD`, `CANCELLED`).
+- **High-Precision Histograms**:
+  - `task_engine_job_execution_duration_seconds`: Bucketed from 5ms up to 60s to enable p50, p95, and p99 query evaluation in Prometheus/Grafana.
+  - `task_engine_job_scheduling_latency_seconds`: Measures exact queue dwell time from job creation to worker execution start.
+
+### 9.2 Context-Aware Structured JSON Logging
+- **`contextvars` Architecture**: Uses Python's native `ContextVar` to propagate request, job, and worker context across asynchronous coroutines without polluting function signatures.
+- **`StructuredJSONFormatter`**: Emits compact, machine-ingestible JSON with fields:
+  `{"timestamp": "...", "level": "INFO", "name": "...", "message": "...", "request_id": "...", "job_id": "...", "worker_id": "..."}`
+- **Correlation ID Middleware**: Automatically extracts or generates `X-Request-ID` on incoming HTTP requests, binds it to the context, and echoes both `X-Request-ID` and `X-Response-Time-Ms` in HTTP response headers.
+
+
 

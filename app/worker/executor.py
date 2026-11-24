@@ -15,7 +15,18 @@ from app.scheduler.priority_queue import PriorityQueue
 from app.scheduler.retry import calculate_backoff_delay
 from app.scheduler.rate_limiter import RateLimiter
 from app.scheduler.dag import DAGManager
-from app.core.logging import get_logger
+from app.core.metrics import (
+    JOBS_COMPLETED,
+    JOB_EXECUTION_DURATION,
+    JOB_SCHEDULING_LATENCY,
+    RUNNING_JOBS,
+)
+from app.core.logging import (
+    get_logger,
+    set_worker_id,
+    set_job_id,
+    clear_context,
+)
 
 logger = get_logger(__name__)
 
@@ -34,6 +45,7 @@ class JobExecutor:
         priority_queue = PriorityQueue(redis)
         rate_limiter = RateLimiter(redis)
         concurrency_slot_acquired = False
+        running_metric_recorded = False
 
         try:
             # 1. Atomically lock and claim the job record
@@ -87,6 +99,16 @@ class JobExecutor:
             job.status = JobStatus.RUNNING
             job.worker_id = worker_id
             job.started_at = utcnow()
+
+            # Set context vars for structured logging & telemetry
+            set_worker_id(worker_id)
+            set_job_id(str(job.id))
+            RUNNING_JOBS.inc()
+            running_metric_recorded = True
+
+            # Track scheduling latency (from creation to execution start)
+            sched_sec = (datetime.now(timezone.utc) - job.created_at).total_seconds()
+            JOB_SCHEDULING_LATENCY.labels(job_type=job.job_type).observe(max(0.0, sched_sec))
 
             attempt = JobAttempt(
                 id=uuid.uuid4(),
@@ -142,6 +164,11 @@ class JobExecutor:
                 attempt.finished_at = utcnow()
                 attempt.execution_duration_ms = duration_ms
 
+                # Record Prometheus completion metrics
+                duration_sec = duration_ms / 1000.0
+                JOB_EXECUTION_DURATION.labels(job_type=job.job_type).observe(duration_sec)
+                JOBS_COMPLETED.labels(job_type=job.job_type, status="SUCCEEDED").inc()
+
                 await session.commit()
                 logger.info(
                     f"Worker [{worker_id}] completed job [{job.id}] "
@@ -195,6 +222,10 @@ class JobExecutor:
                 )
 
         finally:
+            if running_metric_recorded:
+                RUNNING_JOBS.dec()
+            clear_context()
+
             if concurrency_slot_acquired and job:
                 try:
                     await rate_limiter.release_concurrency_slot(job.job_type, str(job.id))
@@ -226,6 +257,11 @@ class JobExecutor:
             await session.commit()
             await priority_queue.clear_cancellation(str(job.id))
             return False
+
+        # Record failure metric
+        duration_sec = (attempt.execution_duration_ms or 0.0) / 1000.0
+        JOB_EXECUTION_DURATION.labels(job_type=job.job_type).observe(duration_sec)
+        JOBS_COMPLETED.labels(job_type=job.job_type, status=attempt.status.value).inc()
 
         if job.retry_count < job.max_retries:
             # Eligible for retry: schedule with exponential backoff + jitter

@@ -9,6 +9,7 @@ from app.models.job import Job, JobDependency, JobStatus, utcnow
 from app.schemas.job import JobCreate, JobResponse, DAGSubmitRequest, DAGSubmitResponse
 from app.scheduler.priority_queue import PriorityQueue
 from app.scheduler.dag import DAGManager, CycleDetectedError
+from app.core.metrics import JOBS_SUBMITTED
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -104,6 +105,8 @@ class JobService:
 
         await session.commit()
         await session.refresh(job)
+
+        JOBS_SUBMITTED.labels(job_type=job.job_type).inc()
 
         # Only enqueue to Redis if initial status is QUEUED
         if initial_status == JobStatus.QUEUED:

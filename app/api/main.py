@@ -5,11 +5,12 @@ from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import get_settings
-from app.core.logging import setup_logging, get_logger
+from app.core.logging import setup_logging, get_logger, set_request_id, clear_context
 from app.core.database import get_engine, close_database_connection
 from app.core.redis import get_redis, close_redis
 from app.api.v1 import v1_router
 from app.api.v1.health import router as root_health_router
+from app.api.v1.metrics import router as root_metrics_router
 
 setup_logging()
 logger = get_logger("task_engine.api")
@@ -19,9 +20,13 @@ class RequestCorrelationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
+        set_request_id(request_id)
         start_time = time.monotonic()
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        finally:
+            clear_context()
 
         duration_ms = round((time.monotonic() - start_time) * 1000, 2)
         response.headers["X-Request-ID"] = request_id
@@ -66,8 +71,9 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestCorrelationMiddleware)
 
-    # Register endpoints: accessible at root (/jobs, /workers, /health) and /api/v1 prefix
+    # Register endpoints: accessible at root (/jobs, /workers, /health, /metrics) and /api/v1 prefix
     app.include_router(root_health_router)
+    app.include_router(root_metrics_router)
     from app.api.v1.jobs import router as jobs_router
     from app.api.v1.workers import router as workers_router
     app.include_router(jobs_router)
