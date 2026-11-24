@@ -50,10 +50,11 @@ async def test_worker_executes_model_inference_job(async_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_worker_executes_failing_job(async_client: AsyncClient):
-    # 1. Submit failing task
+    # 1. Submit failing task (with max_retries=0 to test direct FAILED status)
     payload = {
         "job_type": "failing_task",
         "payload": {"error_message": "Matrix multiplication dimension mismatch"},
+        "max_retries": 0,
     }
     submit_res = await async_client.post("/jobs", json=payload)
     assert submit_res.status_code == 201

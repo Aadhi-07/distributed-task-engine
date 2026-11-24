@@ -102,3 +102,34 @@ return job_id
   - Job transitions to `FAILED` with descriptive timeout error message.
   - Attempt records status `TIMED_OUT` with exact duration in milliseconds.
   - The in-flight Redis entry is cleaned up in the `finally` block.
+
+## 5. Phase 4 Design Decisions: Retries, Backoff, DLQ & Cancellation
+
+### 5.1 Exponential Backoff with Jitter
+When a task raises an unhandled exception or times out:
+- If `retry_count < max_retries`:
+  - Computes backoff delay using decorrelated equal jitter:
+    $$\text{raw\_delay} = \min(\text{max\_seconds}, \text{base\_seconds} \times 2^{\text{retry\_count}})$$
+    $$\text{delay} = \frac{\text{raw\_delay}}{2} + \text{Uniform}\left(0, \frac{\text{raw\_delay}}{2}\right)$$
+  - Prevents the classic "thundering herd" problem where multiple simultaneously failing tasks retry simultaneously and hammer downstream dependencies.
+  - Increments `retry_count += 1`, persists status as `QUEUED`, and sets `scheduled_at = now + delay`.
+  - Pushes into Redis delayed sorted set `task_engine:queue:delayed` with score = `time.time() + delay`.
+
+### 5.2 Atomic Delayed Promotion
+- Periodically, or right before claiming jobs, workers execute an atomic Lua script:
+  - Queries `ZRANGEBYSCORE task_engine:queue:delayed -inf now LIMIT 0 batch_size`.
+  - Atomically pops due items and pushes them into `task_engine:queue:priority` with their recalculated priority score.
+  - Ensures seamless resumption of delayed retries without secondary daemon dependencies.
+
+### 5.3 Dead-Letter Queue (DLQ)
+- Once a job exhausts all permitted attempts (`retry_count >= max_retries`):
+  - Job status transitions to `DEAD`.
+  - `finished_at` timestamp is finalized.
+  - Job ID is registered in `task_engine:queue:dlq`.
+  - The attempt history remains fully preserved for post-mortem analysis.
+
+### 5.4 Job Cancellation
+- `POST /jobs/{id}/cancel` endpoint:
+  - Checks if job has already reached a terminal state (`SUCCEEDED`, `FAILED`, `CANCELLED`, `DEAD`). If so, returns HTTP 409 Conflict.
+  - If `QUEUED`: atomically removes the job from `task_engine:queue:priority` and transitions DB status to `CANCELLED`.
+  - If `RUNNING`: sets a Redis cancellation flag (`task_engine:cancel:<id>`) and marks status as `CANCELLED`. Worker detects this flag upon task completion or during execution loops and drops execution gracefully.

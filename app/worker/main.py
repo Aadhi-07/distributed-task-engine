@@ -95,10 +95,14 @@ class WorkerProcess:
     async def process_next_job(self, timeout: int = 1) -> bool:
         """Atomically pulls and executes one job using Redis Lua script.
         
+        Promotes any ready delayed retry jobs before claiming.
         Returns True if a job was claimed and executed, False if queue was empty.
         """
         redis = await get_redis()
         pq = PriorityQueue(redis)
+
+        # Check and promote any due delayed retry jobs
+        await pq.promote_delayed_jobs()
 
         claimed_id_str = await pq.atomic_claim(worker_id=self.worker_id)
         if not claimed_id_str:

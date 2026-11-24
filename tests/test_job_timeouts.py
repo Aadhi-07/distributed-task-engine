@@ -10,11 +10,12 @@ from app.services.job_service import JobService
 @pytest.mark.asyncio
 async def test_job_execution_timeout(async_client: AsyncClient):
     """Verifies that a job exceeding timeout_seconds is interrupted and marked FAILED with TIMED_OUT attempt."""
-    # Submit job that requests 2.0s sleep, but timeout_seconds is configured to 0.1s
+    # Submit job that requests 2.0s sleep, but timeout_seconds is configured to 1s with max_retries=0
     res = await async_client.post("/jobs", json={
         "job_type": "sleep",
         "payload": {"seconds": 2.0},
         "timeout_seconds": 1,  # 1 second timeout
+        "max_retries": 0,
         "priority": 8,
     })
     assert res.status_code == 201

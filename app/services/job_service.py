@@ -82,6 +82,53 @@ class JobService:
         return res.scalar_one_or_none()
 
     @staticmethod
+    async def cancel_job(
+        session: AsyncSession,
+        redis: Redis,
+        job_id: uuid.UUID,
+    ) -> Tuple[Optional[Job], str]:
+        """Cancels a job if it has not reached a terminal state.
+        
+        Returns:
+            (job, status_code_reason) where reason is:
+            - "not_found"
+            - "terminal_state" (cannot cancel already completed/failed/dead/cancelled jobs)
+            - "cancelled" (successfully transitioned to CANCELLED)
+        """
+        stmt = (
+            select(Job)
+            .where(Job.id == job_id)
+            .with_for_update()
+            .options(selectinload(Job.attempts))
+        )
+        res = await session.execute(stmt)
+        job = res.scalar_one_or_none()
+
+        if not job:
+            return None, "not_found"
+
+        terminal_statuses = {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.DEAD,
+        }
+        if job.status in terminal_statuses:
+            return job, "terminal_state"
+
+        # Transition status to CANCELLED
+        job.status = JobStatus.CANCELLED
+        job.finished_at = utcnow()
+        await session.commit()
+
+        # Signal cancellation in Redis and remove from active queues
+        pq = PriorityQueue(redis)
+        await pq.mark_cancellation(str(job.id))
+        logger.info(f"Job [{job.id}] cancelled by client request.")
+
+        return job, "cancelled"
+
+    @staticmethod
     async def list_jobs(
         session: AsyncSession,
         status: Optional[JobStatus] = None,

@@ -56,6 +56,35 @@ async def get_job(
     return JobResponse.model_validate(job)
 
 
+@router.post(
+    "/{job_id}/cancel",
+    response_model=JobResponse,
+    summary="Cancel a pending, queued, or running job",
+)
+async def cancel_job(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> JobResponse:
+    """Cancels an active or waiting job.
+    
+    Returns HTTP 200 with updated CANCELLED status.
+    Returns HTTP 404 if not found, or HTTP 409 Conflict if already finished.
+    """
+    job, reason = await JobService.cancel_job(session=session, redis=redis, job_id=job_id)
+    if reason == "not_found":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job with id '{job_id}' not found",
+        )
+    if reason == "terminal_state":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot cancel job in terminal status '{job.status}'",
+        )
+    return JobResponse.model_validate(job)
+
+
 @router.get(
     "",
     response_model=JobListResponse,
