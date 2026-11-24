@@ -66,8 +66,10 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestCorrelationMiddleware)
 
-    # Health endpoints at root level and v1 prefix
+    # Register endpoints: accessible at root (/jobs, /health) and /api/v1 prefix
     app.include_router(root_health_router)
+    from app.api.v1.jobs import router as jobs_router
+    app.include_router(jobs_router)
     app.include_router(v1_router, prefix="/api")
 
     return app

@@ -4,13 +4,20 @@ from httpx import AsyncClient, ASGITransport
 
 from app.main import app
 from app.core.database import close_database_connection
-from app.core.redis import close_redis
+from app.core.redis import get_redis, close_redis
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def cleanup_connections():
-    """Ensure database and redis connection pools are cleanly closed between tests."""
+    """Ensure database and redis connection pools are cleanly closed and queues cleared."""
+    try:
+        redis = await get_redis()
+        await redis.flushdb()
+    except Exception:
+        pass
+
     yield
+
     await close_database_connection()
     await close_redis()
 

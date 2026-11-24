@@ -8,15 +8,22 @@ from typing import Optional
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
-from app.core.database import check_database_health, close_database_connection
-from app.core.redis import check_redis_health, close_redis
+from app.core.database import (
+    get_session_factory,
+    check_database_health,
+    close_database_connection,
+)
+from app.core.redis import get_redis, check_redis_health, close_redis
+from app.services.job_service import REDIS_QUEUE_KEY
+from app.worker.executor import JobExecutor
+import app.tasks  # registers workloads
 
 setup_logging()
 logger = get_logger("task_engine.worker")
 
 
 class WorkerProcess:
-    """Core daemon managing worker lifecycle, heartbeat, and execution loop."""
+    """Core daemon managing worker lifecycle, queue polling, and task execution."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -44,15 +51,41 @@ class WorkerProcess:
         else:
             logger.info("Redis connection established.")
 
+    async def process_next_job(self, timeout: int = 1) -> bool:
+        """Pulls and executes one job from the queue. Returns True if a job was processed."""
+        redis = await get_redis()
+        try:
+            # Pop job ID from ready queue
+            result = await redis.blpop(REDIS_QUEUE_KEY, timeout=timeout)
+            if not result:
+                return False
+
+            _, job_id_str = result
+            job_id = uuid.UUID(job_id_str)
+
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                return await JobExecutor.execute_job(
+                    session=session,
+                    job_id=job_id,
+                    worker_id=self.worker_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Error while processing queue item: {exc}")
+            return False
+
     async def start(self) -> None:
         await self.initialize()
         self.is_running = True
-        logger.info(f"Worker [{self.worker_id}] running and ready to process jobs.")
+        logger.info(f"Worker [{self.worker_id}] listening on queue '{REDIS_QUEUE_KEY}'...")
 
         try:
             while not self._shutdown_event.is_set():
-                # In Phase 1, worker runs the daemon heartbeat loop
-                await asyncio.sleep(self.settings.WORKER_HEARTBEAT_INTERVAL)
+                processed = await self.process_next_job(timeout=1)
+                if not processed:
+                    await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             logger.info(f"Worker [{self.worker_id}] received cancellation signal.")
         finally:
@@ -78,7 +111,7 @@ async def run_worker() -> None:
         try:
             loop.add_signal_handler(sig, worker.stop)
         except (NotImplementedError, RuntimeError):
-            # Windows signal handling workaround
+            # Windows signal handling fallback
             signal.signal(sig, lambda *_: worker.stop())
 
     await worker.start()
