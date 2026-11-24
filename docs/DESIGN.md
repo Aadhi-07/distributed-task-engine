@@ -219,5 +219,19 @@ Exposed via `GET /metrics` and `GET /api/v1/metrics` using `prometheus_client`:
   `{"timestamp": "...", "level": "INFO", "name": "...", "message": "...", "request_id": "...", "job_id": "...", "worker_id": "..."}`
 - **Correlation ID Middleware**: Automatically extracts or generates `X-Request-ID` on incoming HTTP requests, binds it to the context, and echoes both `X-Request-ID` and `X-Response-Time-Ms` in HTTP response headers.
 
+## 10. Phase 9 Design Decisions: Chaos Engineering & Fault Tolerance
+
+### 10.1 Worker Mid-Execution Crash Recovery
+- **Failure Simulation**: Abrupt termination of an in-flight worker node mid-execution (simulating kernel panics, OOM kills, or power cuts).
+- **At-Least-Once Delivery**:
+  - Unresponsive node detected via missed Redis/Postgres heartbeats.
+  - In-flight jobs locked via `SELECT ... FOR UPDATE`, attempt recorded documenting crash state, status restored to `QUEUED`, and job re-enqueued to Redis.
+  - Successor workers transparently claim and execute the job to completion with zero job loss.
+
+### 10.2 Transient Redis Partition Tolerance
+- The engine handles transient Redis disconnects gracefully: workers catch connection failures, back off, and re-establish connection pool health once connectivity recovers.
+- All transactional state and audit history remain durably persisted in PostgreSQL.
+
+
 
 
