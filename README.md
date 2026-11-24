@@ -282,6 +282,85 @@ task_engine_jobs_completed_total{job_type="model_training",status="SUCCEEDED"} 5
 
 ---
 
+## Real-Time Visual Dashboard
+
+The platform includes a real-time visual monitoring dashboard inspired by a dark "policy knowledge graph" interface. Served via plain HTML, CSS, and vanilla JavaScript (with pinned D3.js v7 for the force-directed topology layout) directly from FastAPI StaticFiles at `/dashboard`.
+
+```mermaid
+flowchart LR
+    subgraph Browser["Browser Client (/dashboard)"]
+        UI["Vanilla JS + D3 v7 Force Graph\n(Top Bar, Inspector, Event Feed)"]
+        POLL["1-Second Polling Loop\n(If-None-Match: <etag>)"]
+    end
+
+    subgraph API["FastAPI Tier"]
+        SNAP["GET /api/v1/dashboard/snapshot"]
+        ETAG_CHECK{"ETag Match?"}
+        NOT_MOD["304 Not Modified\n(Minimal CPU & Network)"]
+        SERVICE["DashboardService\n(Strict Read-Only Aggregator)"]
+    end
+
+    subgraph Storage["Persistence & Coordination"]
+        PG[("PostgreSQL 16\n(Jobs, Attempts, Workers, DAGs)")]
+        RD[("Redis 7\n(Queue Depths, Delayed, DLQ)")]
+    end
+
+    UI --> POLL
+    POLL -->|GET /snapshot + If-None-Match| SNAP
+    SNAP --> ETAG_CHECK
+    ETAG_CHECK -->|Unchanged State| NOT_MOD
+    NOT_MOD -.->|HTTP 304| UI
+    ETAG_CHECK -->|State Changed| SERVICE
+    SERVICE -->|Optimized indexed queries| PG
+    SERVICE -->|Atomic ZCARD queue metrics| RD
+    SERVICE -->|HTTP 200 + Snapshot JSON + ETag| UI
+```
+
+### Visual & Semantic Architecture
+- **Central Queue Hub**: Represents the scheduler and priority queue with live depth counters.
+- **Worker Orbital Ring**: Active workers arranged in an orbit around the hub; node radius encodes load score and ring color reflects health (`#4ADE80` healthy, `#FBBF24` stale heartbeat, `#F87171` dead).
+- **Job Nodes**: Queued jobs cluster around the hub; running jobs attach to their executing worker; finished jobs fade outward.
+- **Dynamic Edges**:
+  - **Queue Edges**: Subtle dashed grey edges from hub to queued jobs.
+  - **Assignment Edges**: Flowing pulsing cyan edges connecting workers to in-flight jobs.
+  - **DAG Dependencies**: Directed arrows encoding parent-child relationships. Red dashed edges (`#F87171`) explicitly highlight jobs blocked by failed parents.
+- **Top Metrics Strip**: Real-time queue depth breakdown (priority, delayed, DLQ), throughput (jobs/s), p50/p95/p99 latency (ms), failure rate %, and alive worker capacity.
+- **Right Inspector Panel**: Click any node to inspect complete metadata, execution duration, full attempt history, parent/child DAG dependencies, input/output payload, and error stack traces.
+- **Bottom Event Feed**: Auto-scrolling real-time log of the last 50 state transitions (`QUEUED`, `RUNNING`, `SUCCEEDED`, `RETRY`, `DEAD`, `WORKER_LOST`, `REQUEUED`).
+- **Filters & Search**: Filter by status pills, job type, minimum priority threshold (0-9), or free-text search across job IDs, worker IDs, and error messages.
+
+### How to Run the Dashboard
+
+1. **Start the API server**:
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+
+2. **Start one or more workers**:
+   ```bash
+   python -m app.worker
+   ```
+
+3. **Open the Dashboard in your browser**:
+   ```text
+   http://localhost:8000/dashboard
+   ```
+
+4. **Run the Live Demo Workload Generator**:
+   In another terminal, run `scripts/demo.py` to submit a diamond DAG with a deliberately failing branch alongside a burst of mixed-priority workloads:
+   ```bash
+   # Submit a Diamond DAG + 30 mixed-priority jobs
+   python scripts/demo.py --burst 30
+
+   # Or run with an ephemeral worker to observe live execution cycles in the UI
+   python scripts/demo.py --burst 30 --run-worker
+   ```
+
+> [!IMPORTANT]
+> **Security Notice**: The visual dashboard is strictly **unauthenticated** and is designed specifically for **local development, observability, and debugging**. It operates in strict read-only mode against the engine and cannot mutate job states. Do not expose `/dashboard` or the snapshot endpoint directly to public networks without placing them behind an authenticating reverse proxy or API gateway.
+
+---
+
 ## Testing & Quality Assurance
 
 Run the complete test suite:
