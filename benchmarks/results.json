@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-11-24T10:59:17.880730+00:00",
+  "total_jobs": 1000,
+  "successful_jobs": 1000,
+  "failed_jobs": 0,
+  "failure_rate_percent": 0.0,
+  "workers_count": 6,
+  "concurrency_per_worker": 4,
+  "total_worker_slots": 24,
+  "submission_duration_sec": 39.41,
+  "submission_throughput_rps": 25.4,
+  "execution_duration_sec": 33.58,
+  "processing_throughput_jobs_per_sec": 29.8,
+  "submission_latency_ms": {
+    "min": 750.0,
+    "p50": 1531.0,
+    "p90": 3422.0,
+    "p95": 4047.75,
+    "p99": 5328.63,
+    "max": 8172.0
+  },
+  "scheduling_latency_ms": {
+    "min": 743.4,
+    "p50": 29483.42,
+    "p90": 51617.45,
+    "p95": 56074.38,
+    "p99": 62383.8,
+    "max": 65798.08
+  },
+  "execution_duration_ms": {
+    "min": 15.0,
+    "p50": 47.0,
+    "p90": 1015.0,
+    "p95": 1031.0,
+    "p99": 1047.0,
+    "max": 1141.0
+  },
+  "status_breakdown": {
+    "SUCCEEDED": 1000
+  }
+}

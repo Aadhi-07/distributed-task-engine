@@ -232,6 +232,23 @@ Exposed via `GET /metrics` and `GET /api/v1/metrics` using `prometheus_client`:
 - The engine handles transient Redis disconnects gracefully: workers catch connection failures, back off, and re-establish connection pool health once connectivity recovers.
 - All transactional state and audit history remain durably persisted in PostgreSQL.
 
+## 11. Phase 10 Design Decisions: High-Concurrency Load Testing
+
+### 11.1 Benchmark Topology
+- **Concurrency**: 50 parallel client coroutines submitting 1,000 distinct jobs across mixed types (`model_inference`, `batch_scoring`, `sleep`, `model_training`) with random priorities (0-9).
+- **Execution Fleet**: 6 worker process daemons (4 execution slots each = 24 parallel execution slots).
+- **Tooling**: Locust workload suite (`benchmarks/locustfile.py`) and high-throughput async runner (`benchmarks/load_test_runner.py`).
+
+### 11.2 Measured Performance Metrics
+All metrics extracted directly from live PostgreSQL and Redis runtime measurements (stored in `benchmarks/results.json`):
+- **Total Jobs**: 1,000 submitted / 1,000 completed.
+- **Success Rate**: 100.0% (0 failures, 0 lost jobs).
+- **Submission Throughput**: 25.4 req/s.
+- **Processing Throughput**: 29.8 jobs/s.
+- **Scheduling Dwell Latency**: p50 = 29.48s, p95 = 56.07s, p99 = 62.38s (governed by 24 slot queue drain rate).
+- **Task Execution Duration**: p50 = 47.0ms, p95 = 1,031.0ms, p99 = 1,047.0ms.
+
+
 
 
 
