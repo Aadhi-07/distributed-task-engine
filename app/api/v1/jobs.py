@@ -7,8 +7,9 @@ from redis.asyncio import Redis
 from app.core.database import get_db_session
 from app.core.redis import get_redis
 from app.models.job import JobStatus
-from app.schemas.job import JobCreate, JobResponse, JobListResponse
+from app.schemas.job import JobCreate, JobResponse, JobListResponse, DAGSubmitRequest, DAGSubmitResponse
 from app.services.job_service import JobService
+from app.scheduler.dag import CycleDetectedError
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
@@ -29,12 +30,54 @@ async def submit_job(
     
     If idempotency_key is provided and an existing job with that key exists,
     returns the existing job with HTTP 200 OK. Otherwise, creates the job,
-    persists it in PostgreSQL as QUEUED, enqueues to Redis, and returns HTTP 201 Created.
+    validates DAG dependencies, persists it in PostgreSQL, and enqueues to Redis if ready.
     """
-    job, is_created = await JobService.submit_job(session=session, redis=redis, job_in=job_in)
+    try:
+        job, is_created = await JobService.submit_job(session=session, redis=redis, job_in=job_in)
+    except CycleDetectedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Circular dependency error: {exc}",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
     if not is_created:
         response.status_code = status.HTTP_200_OK
     return JobResponse.model_validate(job)
+
+
+@router.post(
+    "/dag",
+    response_model=DAGSubmitResponse,
+    summary="Submit a batch DAG workflow",
+    status_code=status.HTTP_201_CREATED,
+)
+async def submit_dag(
+    dag_in: DAGSubmitRequest,
+    session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
+) -> DAGSubmitResponse:
+    """Submits an entire DAG workflow batch.
+    
+    Performs topological cycle detection across all nodes and edges before saving.
+    Root nodes (no dependencies) are immediately enqueued to Redis.
+    """
+    try:
+        return await JobService.submit_dag(session=session, redis=redis, dag_req=dag_in)
+    except CycleDetectedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Circular dependency error: {exc}",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
 
 
 @router.get(

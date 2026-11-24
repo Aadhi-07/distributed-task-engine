@@ -184,3 +184,22 @@ $$\text{Load Score} = 0.5 \times \left(\frac{\text{running\_jobs}}{\text{concurr
 - Enforces requests-per-window quotas (e.g. 5 calls per 60s for external APIs or LLM inference endpoints).
 - Members are formatted as `<timestamp>:<seq>` to guarantee element uniqueness within identical microsecond execution intervals.
 
+## 8. Phase 7 Design Decisions: Job Dependencies (DAG Execution)
+
+### 8.1 Cycle Detection via DFS Graph Coloring
+- Validates batch dependency graphs and incremental parent relationships using 3-color DFS cycle detection ($0$ = unvisited, $1$ = in recursion stack, $2$ = completed).
+- Self-dependencies ($A \to A$) and multi-hop circular paths ($A \to B \to C \to A$) are rejected upfront with HTTP 400 Bad Request before database persistence.
+
+### 8.2 Dependency Gatekeeper & Dynamic Unblocking
+- **Initial Gate**: If a job specifies `depends_on`, it starts in `PENDING` status and is NOT enqueued into Redis.
+- **Completion Hook**: When a parent job transitions to `SUCCEEDED`, the worker triggers `DAGManager.on_job_succeeded(...)`:
+  - Queries all dependent children where `depends_on_job_id == parent.id`.
+  - Atomically verifies if all prerequisite parent jobs have reached `SUCCEEDED`.
+  - Once satisfied, the child is promoted from `PENDING` to `QUEUED` and pushed into the Redis priority queue.
+
+### 8.3 Fail-Fast Cascading
+- If any parent job terminates abnormally (`FAILED`, `CANCELLED`, or `DEAD`), downstream dependents cannot proceed.
+- Downstream jobs immediately transition to `FAILED` with explicit root-cause error diagnostics (`Dependency failure: parent job [...] terminated with status [...]`).
+- Prevents wasted execution cycles and ensures atomic pipeline integrity.
+
+

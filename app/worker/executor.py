@@ -14,6 +14,7 @@ from app.tasks.registry import execute_task
 from app.scheduler.priority_queue import PriorityQueue
 from app.scheduler.retry import calculate_backoff_delay
 from app.scheduler.rate_limiter import RateLimiter
+from app.scheduler.dag import DAGManager
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -125,6 +126,10 @@ class JobExecutor:
                     attempt.execution_duration_ms = duration_ms
                     await session.commit()
                     await priority_queue.clear_cancellation(str(job_id))
+                    try:
+                        await DAGManager.on_job_failed(session, job.id, JobStatus.CANCELLED)
+                    except Exception as exc:
+                        logger.error(f"Error cascading DAG cancellation for job [{job.id}]: {exc}")
                     return False
 
                 # 4a. Success: Transition to SUCCEEDED
@@ -142,6 +147,13 @@ class JobExecutor:
                     f"Worker [{worker_id}] completed job [{job.id}] "
                     f"successfully in {duration_ms}ms."
                 )
+
+                # Trigger DAG resolution for dependent downstream jobs
+                try:
+                    await DAGManager.on_job_succeeded(session, redis, job.id)
+                except Exception as exc:
+                    logger.error(f"Error resolving DAG dependencies for job [{job.id}]: {exc}")
+
                 return True
 
             except asyncio.TimeoutError:
@@ -253,4 +265,11 @@ class JobExecutor:
 
             job.finished_at = utcnow()
             await session.commit()
+
+            # Cascade DAG failure to downstream dependent jobs
+            try:
+                await DAGManager.on_job_failed(session, job.id, job.status)
+            except Exception as exc:
+                logger.error(f"Error cascading DAG failure for job [{job.id}]: {exc}")
+
             return False

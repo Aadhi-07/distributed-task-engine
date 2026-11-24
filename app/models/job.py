@@ -120,6 +120,12 @@ class Job(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def depends_on(self) -> List[uuid.UUID]:
+        if not hasattr(self, "_sa_instance_state") or not self.dependencies:
+            return []
+        return [dep.depends_on_job_id for dep in self.dependencies]
+
     __table_args__ = (
         Index("ix_jobs_status_priority", "status", "priority"),
         Index("ix_jobs_created_at_desc", created_at.desc()),

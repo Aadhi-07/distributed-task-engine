@@ -67,6 +67,10 @@ class PriorityQueue:
         self._complete_script = self.redis.register_script(LUA_ATOMIC_COMPLETE_JOB)
         self._promote_script = self.redis.register_script(LUA_PROMOTE_DELAYED_JOBS)
 
+    async def qsize(self) -> int:
+        """Returns the number of jobs currently waiting in the active priority queue."""
+        return await self.redis.zcard(REDIS_PRIORITY_QUEUE_KEY)
+
     async def enqueue(
         self,
         job_id: str,
