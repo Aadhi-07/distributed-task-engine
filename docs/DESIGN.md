@@ -68,3 +68,37 @@ The Distributed Task Execution Engine is a high-performance, fault-tolerant plat
 ### 3.3 Execution History (JobAttempt)
 - Every execution run creates an immutable `JobAttempt` record linking to the parent `Job`.
 - Tracks `attempt_number`, `worker_id`, `started_at`, `finished_at`, `status`, `error`, stack traces, and exact `execution_duration_ms`.
+
+## 4. Phase 3 Design Decisions: Priority Queue, Atomic Claims & Timeouts
+
+### 4.1 Priority Scheduling Formula (0-9 with Strict FIFO Tie-Breaking)
+Redis Sorted Sets (`ZSET`) order elements by a 64-bit IEEE double-precision float score.
+We compute scores using the formula:
+$$\text{Score} = (9 - \text{priority}) \times 10^9 + (\text{epoch\_seconds} \bmod 10^9)$$
+
+- **Priority Dominance**: Priority 9 yields an offset of $0 \times 10^9$; Priority 8 yields $1 \times 10^9$, down to Priority 0 yielding $9 \times 10^9$. Because $10^9$ is larger than any modulo time offset, a higher priority job is mathematically guaranteed to have a lower score than any lower priority job.
+- **Strict FIFO within Same Priority**: For two jobs with identical priority, the earlier job has an earlier timestamp, producing a smaller score. With `ZPOPMIN`, the older job is popped first.
+
+### 4.2 Atomic Dequeue with Redis Lua Scripting
+To eliminate double-execution race conditions when multiple worker processes compete for jobs:
+```lua
+local item = redis.call('ZPOPMIN', KEYS[1], 1)
+if not item or #item == 0 then
+    return nil
+end
+local job_id = item[1]
+local score = item[2]
+redis.call('HSET', KEYS[2], job_id, ARGV[1] .. ':' .. ARGV[2])
+return job_id
+```
+- Executed atomically on the Redis single thread.
+- Pops the candidate job and immediately records it into `task_engine:processing` with the `worker_id` and start timestamp in a single atomic transaction.
+- When execution finishes (success, failure, or timeout), `HDEL` removes the job from the in-flight hash.
+
+### 4.3 Per-Job Execution Timeouts
+- Uses `asyncio.wait_for(task, timeout=job.timeout_seconds)` to guard execution.
+- If a task exceeds its allocated duration:
+  - Worker interrupts task execution.
+  - Job transitions to `FAILED` with descriptive timeout error message.
+  - Attempt records status `TIMED_OUT` with exact duration in milliseconds.
+  - The in-flight Redis entry is cleaned up in the `finally` block.

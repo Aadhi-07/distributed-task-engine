@@ -7,15 +7,14 @@ from redis.asyncio import Redis
 
 from app.models.job import Job, JobStatus, utcnow
 from app.schemas.job import JobCreate
+from app.scheduler.priority_queue import PriorityQueue
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-REDIS_QUEUE_KEY = "task_engine:queue:ready"
-
 
 class JobService:
-    """Manages job persistence, retrieval, and queueing lifecycle."""
+    """Manages job persistence, retrieval, and priority scheduling."""
 
     @staticmethod
     async def submit_job(
@@ -60,9 +59,13 @@ class JobService:
         await session.commit()
         await session.refresh(job)
 
-        # Enqueue job ID into Redis
-        await redis.rpush(REDIS_QUEUE_KEY, str(job.id))
-        logger.info(f"Job [{job.id}] (type: {job.job_type}, priority: {job.priority}) queued in Redis.")
+        # Enqueue job ID into Redis Priority Queue (ZSET)
+        pq = PriorityQueue(redis)
+        score = await pq.enqueue(str(job.id), priority=job.priority)
+        logger.info(
+            f"Job [{job.id}] (type: {job.job_type}, priority: {job.priority}, score: {score}) "
+            f"queued in Redis priority ZSET."
+        )
 
         # Re-fetch with eager loaded attempts
         return await JobService.get_job_by_id(session, job.id), True
@@ -97,11 +100,9 @@ class JobService:
             base_query = base_query.where(Job.job_type == job_type)
             count_query = count_query.where(Job.job_type == job_type)
 
-        # Total count
         total_res = await session.execute(count_query)
         total = total_res.scalar_one()
 
-        # Paginated items
         items_query = (
             base_query
             .order_by(Job.created_at.desc())
