@@ -33,6 +33,17 @@ def normalize_sync_database_url(url: Optional[str]) -> Optional[str]:
     return url
 
 
+def normalize_redis_url(url: Optional[str]) -> Optional[str]:
+    """Normalizes Redis URLs, mapping localhost to 127.0.0.1 to avoid Windows IPv6 resolution latency."""
+    if not url:
+        return url
+    if "://localhost" in url:
+        return url.replace("://localhost", "://127.0.0.1", 1)
+    elif "://@localhost" in url:
+        return url.replace("://@localhost", "://@127.0.0.1", 1)
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -63,7 +74,7 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
 
     # Redis Queue & Coordination
-    REDIS_HOST: str = "localhost"
+    REDIS_HOST: str = "127.0.0.1"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_PASSWORD: Optional[str] = None
@@ -85,9 +96,10 @@ class Settings(BaseSettings):
         """Returns the async SQLAlchemy database URL (using asyncpg)."""
         if self.DATABASE_URL:
             return normalize_async_database_url(self.DATABASE_URL)
+        host = "127.0.0.1" if self.POSTGRES_HOST == "localhost" else self.POSTGRES_HOST
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
-            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            f"{host}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 
     @property
@@ -95,18 +107,20 @@ class Settings(BaseSettings):
         """Returns the sync SQLAlchemy database URL (used by Alembic migrations)."""
         if self.DATABASE_URL:
             return normalize_sync_database_url(self.DATABASE_URL)
+        host = "127.0.0.1" if self.POSTGRES_HOST == "localhost" else self.POSTGRES_HOST
         return (
             f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
-            f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            f"{host}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 
     @property
     def redis_connection_url(self) -> str:
         """Returns standard Redis connection string."""
         if self.REDIS_URL:
-            return self.REDIS_URL
+            return normalize_redis_url(self.REDIS_URL)
+        host = "127.0.0.1" if self.REDIS_HOST == "localhost" else self.REDIS_HOST
         auth_part = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        return f"redis://{auth_part}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        return f"redis://{auth_part}{host}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
 @lru_cache

@@ -66,10 +66,11 @@ class WorkerProcess:
         self._active_tasks: Set[asyncio.Task] = set()
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._semaphore = asyncio.Semaphore(self.concurrency)
+        self._claim_lock = asyncio.Lock()
         self._running_jobs_count = 0
 
     async def register(self) -> None:
-        """Registers this worker node in PostgreSQL."""
+        """Registers this worker node in PostgreSQL and LoadBalancer."""
         session_factory = get_session_factory()
         async with session_factory() as session:
             stmt = select(WorkerNode).where(WorkerNode.id == self.worker_id)
@@ -98,6 +99,20 @@ class WorkerProcess:
                 session.add(worker_node)
             await session.commit()
             logger.info(f"Worker [{self.worker_id}] registered in database as HEALTHY (concurrency={self.concurrency}).")
+
+        # Register in Redis LoadBalancer
+        try:
+            redis = await get_redis()
+            lb = LoadBalancer(redis)
+            await lb.update_worker_load(
+                worker_id=self.worker_id,
+                cpu_percent=round(psutil.cpu_percent(interval=None), 1),
+                memory_percent=round(psutil.virtual_memory().percent, 1),
+                running_jobs=self._running_jobs_count,
+                concurrency=self.concurrency,
+            )
+        except Exception as exc:
+            logger.warning(f"Worker [{self.worker_id}] failed to register load in LoadBalancer: {exc}")
 
     async def initialize(self) -> None:
         logger.info(
@@ -164,27 +179,45 @@ class WorkerProcess:
     async def process_next_job(self, timeout: int = 1) -> bool:
         """Pulls and executes one job. Checks private queue first, then priority queue.
         
-        Returns True if a job was claimed and executed, False if queues were empty.
+        Returns True if a job was claimed and executed, False if queues were empty or worker saturated.
         """
-        redis = await get_redis()
-        lb = LoadBalancer(redis)
-        pq = PriorityQueue(redis)
+        async with self._claim_lock:
+            # Strictly enforce concurrency: do not claim when already at full capacity
+            if self._running_jobs_count >= self.concurrency:
+                return False
 
-        # 1. Check targeted private queue first (for load-aware assignments)
-        claimed_id_str = await lb.pop_from_private_queue(self.worker_id)
+            redis = await get_redis()
+            lb = LoadBalancer(redis)
+            pq = PriorityQueue(redis)
 
-        # 2. If no targeted job, check and promote delayed jobs, then claim from priority queue
-        if not claimed_id_str:
-            await pq.promote_delayed_jobs()
-            claimed_id_str = await pq.atomic_claim(worker_id=self.worker_id)
+            # 1. Check targeted private queue first (for load-aware assignments)
+            claimed_id_str = await lb.pop_from_private_queue(self.worker_id)
 
-        if not claimed_id_str:
-            return False
+            # 2. If no targeted job, check and promote delayed jobs, then claim from priority queue
+            if not claimed_id_str:
+                await pq.promote_delayed_jobs()
+                claimed_id_str = await pq.atomic_claim(worker_id=self.worker_id)
+
+            if not claimed_id_str:
+                return False
+
+            self._running_jobs_count += 1
+
+        # Reflect active load in Redis LoadBalancer
+        try:
+            await lb.update_worker_load(
+                worker_id=self.worker_id,
+                cpu_percent=round(psutil.cpu_percent(interval=None), 1),
+                memory_percent=round(psutil.virtual_memory().percent, 1),
+                running_jobs=self._running_jobs_count,
+                concurrency=self.concurrency,
+            )
+        except Exception:
+            pass
 
         job_id = uuid.UUID(claimed_id_str)
         session_factory = get_session_factory()
         async with session_factory() as session:
-            self._running_jobs_count += 1
             try:
                 return await JobExecutor.execute_job(
                     session=session,
@@ -193,7 +226,18 @@ class WorkerProcess:
                     worker_id=self.worker_id,
                 )
             finally:
-                self._running_jobs_count -= 1
+                async with self._claim_lock:
+                    self._running_jobs_count -= 1
+                try:
+                    await lb.update_worker_load(
+                        worker_id=self.worker_id,
+                        cpu_percent=round(psutil.cpu_percent(interval=None), 1),
+                        memory_percent=round(psutil.virtual_memory().percent, 1),
+                        running_jobs=self._running_jobs_count,
+                        concurrency=self.concurrency,
+                    )
+                except Exception:
+                    pass
 
     async def _worker_loop(self) -> None:
         """Continuous polling loop respecting concurrency semaphore."""

@@ -101,6 +101,21 @@ class HeartbeatManager:
                 await redis.zrem(REDIS_WORKERS_HEARTBEAT_ZSET, node.id)
                 await redis.delete(f"{REDIS_WORKER_META_PREFIX}{node.id}")
 
+                # Drain any unstarted jobs stranded in the dead worker's private queue
+                private_queue_key = f"task_engine:worker:queue:{node.id}"
+                while True:
+                    orphaned = await redis.lpop(private_queue_key)
+                    if not orphaned:
+                        break
+                    orphaned_id = orphaned.decode() if isinstance(orphaned, bytes) else str(orphaned)
+                    job_stmt = select(Job).where(Job.id == uuid.UUID(orphaned_id))
+                    job_res = await session.execute(job_stmt)
+                    queued_job = job_res.scalar_one_or_none()
+                    prio = queued_job.priority if queued_job else 5
+                    await pq.enqueue(orphaned_id, priority=prio)
+                    requeued_jobs.append(orphaned_id)
+                    logger.warning(f"Requeued unstarted private-queue job [{orphaned_id}] from dead worker [{node.id}].")
+
                 # 2. Find any RUNNING jobs assigned to this dead worker
                 job_stmt = select(Job).where(
                     Job.worker_id == node.id,
