@@ -1,0 +1,70 @@
+services:
+  # 1. FastAPI API Tier (Web Service)
+  - type: web
+    name: task-engine-api
+    env: docker
+    dockerfilePath: ./docker/Dockerfile.api
+    healthCheckPath: /health/live
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: task-engine-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: task-engine-redis
+          property: connectionString
+      - key: API_KEY
+        sync: false
+      - key: PORT
+        value: "10000"
+
+  # 2. Worker Fleet (Background Worker, 3 Instances)
+  - type: worker
+    name: task-engine-worker
+    env: docker
+    dockerfilePath: ./docker/Dockerfile.worker
+    numInstances: 3
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: task-engine-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: task-engine-redis
+          property: connectionString
+      - key: WORKER_CONCURRENCY
+        value: "4"
+
+  # 3. Redis Coordination & Queue (Key Value)
+  - type: keyvalue
+    name: task-engine-redis
+    plan: free
+    ipAllowList: []
+
+  # 4. Prometheus Scraper (Private Service)
+  - type: pserv
+    name: prometheus
+    env: docker
+    dockerContext: ./monitoring/prometheus
+    dockerfilePath: ./monitoring/prometheus/Dockerfile
+
+  # 5. Grafana Dashboard (Web Service)
+  - type: web
+    name: grafana
+    env: docker
+    dockerContext: ./monitoring/grafana
+    dockerfilePath: ./monitoring/grafana/Dockerfile
+    envVars:
+      - key: GF_SECURITY_ADMIN_PASSWORD
+        sync: false
+      - key: GF_SERVER_HTTP_PORT
+        value: "10000"
+
+databases:
+  # 6. PostgreSQL Persistence
+  - name: task-engine-db
+    plan: free
