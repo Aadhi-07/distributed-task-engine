@@ -35,8 +35,32 @@ class WorkerProcess:
         self.settings = get_settings()
         self.hostname = socket.gethostname()
         self.pid = os.getpid()
-        self.worker_id = worker_id or f"worker-{self.hostname}-{self.pid}-{uuid.uuid4().hex[:6]}"
-        self.concurrency = concurrency or self.settings.WORKER_CONCURRENCY
+
+        # Unique worker identity:
+        # Priority: explicit arg > WORKER_ID env > RENDER_INSTANCE_ID (Render) > hostname-pid-random
+        render_instance_id = os.environ.get("RENDER_INSTANCE_ID")
+        env_worker_id = os.environ.get("WORKER_ID")
+        if worker_id:
+            self.worker_id = worker_id
+        elif env_worker_id:
+            self.worker_id = env_worker_id
+        elif render_instance_id:
+            self.worker_id = f"worker-{render_instance_id}-{uuid.uuid4().hex[:6]}"
+        else:
+            self.worker_id = f"worker-{self.hostname}-{self.pid}-{uuid.uuid4().hex[:6]}"
+
+        # Concurrency per worker: explicit arg > WORKER_CONCURRENCY env > settings (default 4)
+        env_concurrency = os.environ.get("WORKER_CONCURRENCY")
+        if concurrency is not None:
+            self.concurrency = concurrency
+        elif env_concurrency is not None:
+            try:
+                self.concurrency = max(1, int(env_concurrency))
+            except ValueError:
+                self.concurrency = self.settings.WORKER_CONCURRENCY
+        else:
+            self.concurrency = self.settings.WORKER_CONCURRENCY
+
         self.is_running = False
         self._shutdown_event = asyncio.Event()
         self._active_tasks: Set[asyncio.Task] = set()
@@ -217,10 +241,23 @@ class WorkerProcess:
             except asyncio.CancelledError:
                 pass
 
-        # Wait for in-flight tasks to complete
+        # Wait for in-flight tasks to complete (drain with clean 25s timeout)
         if self._active_tasks:
-            logger.info(f"Waiting for {len(self._active_tasks)} active job task(s) to finish...")
-            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+            logger.info(f"Draining {len(self._active_tasks)} active in-flight job task(s)...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._active_tasks, return_exceptions=True),
+                    timeout=25.0,
+                )
+                logger.info(f"All active tasks drained cleanly for worker [{self.worker_id}].")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Worker [{self.worker_id}] drain timed out after 25s. "
+                    f"Cancelling {len(self._active_tasks)} remaining task(s)..."
+                )
+                for task in self._active_tasks:
+                    task.cancel()
+                await asyncio.gather(*self._active_tasks, return_exceptions=True)
 
         # Update status in DB
         try:
@@ -256,13 +293,17 @@ async def run_worker() -> None:
     worker = WorkerProcess()
     loop = asyncio.get_running_loop()
 
-    # Graceful signal handling
+    def _handle_signal():
+        logger.info(f"Received termination signal. Draining worker [{worker.worker_id}]...")
+        worker.stop()
+
+    # Graceful signal handling for SIGINT and SIGTERM
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, worker.stop)
+            loop.add_signal_handler(sig, _handle_signal)
         except (NotImplementedError, RuntimeError):
             # Windows signal handling fallback
-            signal.signal(sig, lambda *_: worker.stop())
+            signal.signal(sig, lambda *_: _handle_signal())
 
     await worker.start()
 

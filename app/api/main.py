@@ -11,6 +11,7 @@ from app.core.redis import get_redis, close_redis
 from app.api.v1 import v1_router
 from app.api.v1.health import router as root_health_router
 from app.api.v1.metrics import router as root_metrics_router
+from app.api.middleware.auth import APIKeyAuthMiddleware
 
 setup_logging()
 logger = get_logger("task_engine.api")
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(RequestCorrelationMiddleware)
+    app.add_middleware(APIKeyAuthMiddleware)
 
     # Register endpoints: accessible at root (/jobs, /workers, /health, /metrics) and /api/v1 prefix
     app.include_router(root_health_router)

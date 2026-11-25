@@ -24,6 +24,8 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 settings = get_settings()
+# Ensure Alembic's config dictionary contains the normalized asyncpg database URL
+config.set_main_option("sqlalchemy.url", settings.async_database_url)
 
 
 def run_migrations_offline() -> None:

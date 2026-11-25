@@ -3,6 +3,36 @@ from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def normalize_async_database_url(url: Optional[str]) -> Optional[str]:
+    """Normalizes Postgres connection URLs to asyncpg dialect (postgresql+asyncpg://).
+    
+    Handles standard Render database URLs (which begin with postgresql:// or postgres://)
+    as well as existing asyncpg schemes.
+    """
+    if not url:
+        return url
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://"):]
+    elif url.startswith("postgresql+asyncpg://"):
+        return url
+    return url
+
+
+def normalize_sync_database_url(url: Optional[str]) -> Optional[str]:
+    """Normalizes Postgres connection URLs to synchronous driver dialect (postgresql://)."""
+    if not url:
+        return url
+    if url.startswith("postgresql+asyncpg://"):
+        return "postgresql://" + url[len("postgresql+asyncpg://"):]
+    elif url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        return url
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -20,7 +50,9 @@ class Settings(BaseSettings):
 
     # API
     API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
+    API_PORT: int = 10000
+    PORT: Optional[int] = None
+    API_KEY: Optional[str] = None
 
     # PostgreSQL Persistence
     POSTGRES_HOST: str = "localhost"
@@ -44,15 +76,15 @@ class Settings(BaseSettings):
     DEFAULT_JOB_TIMEOUT: int = 300
 
     @property
+    def server_port(self) -> int:
+        """Effective API port binding, preferring $PORT (Render) over API_PORT."""
+        return self.PORT or self.API_PORT
+
+    @property
     def async_database_url(self) -> str:
-        """Returns the async SQLAlchemy database URL."""
+        """Returns the async SQLAlchemy database URL (using asyncpg)."""
         if self.DATABASE_URL:
-            url = self.DATABASE_URL
-            if url.startswith("postgres://"):
-                return url.replace("postgres://", "postgresql+asyncpg://", 1)
-            elif url.startswith("postgresql://"):
-                return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            return url
+            return normalize_async_database_url(self.DATABASE_URL)
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
             f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -62,12 +94,7 @@ class Settings(BaseSettings):
     def sync_database_url(self) -> str:
         """Returns the sync SQLAlchemy database URL (used by Alembic migrations)."""
         if self.DATABASE_URL:
-            url = self.DATABASE_URL
-            if url.startswith("postgresql+asyncpg://"):
-                return url.replace("postgresql+asyncpg://", "postgresql://", 1)
-            elif url.startswith("postgres://"):
-                return url.replace("postgres://", "postgresql://", 1)
-            return url
+            return normalize_sync_database_url(self.DATABASE_URL)
         return (
             f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
             f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
