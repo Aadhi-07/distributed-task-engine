@@ -17,6 +17,7 @@ from app.scheduler.rate_limiter import RateLimiter
 from app.scheduler.dag import DAGManager
 from app.core.metrics import (
     JOBS_COMPLETED,
+    JOBS_RETRIED,
     JOB_EXECUTION_DURATION,
     JOB_SCHEDULING_LATENCY,
     RUNNING_JOBS,
@@ -274,6 +275,7 @@ class JobExecutor:
             job.retry_count += 1
             job.status = JobStatus.QUEUED
             job.scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            JOBS_RETRIED.labels(job_type=job.job_type).inc()
             await session.commit()
 
             await priority_queue.enqueue_delayed(

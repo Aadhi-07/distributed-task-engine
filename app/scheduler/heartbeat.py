@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.worker import WorkerNode, WorkerStatus, utcnow
 from app.models.job import Job, JobAttempt, JobStatus, AttemptStatus
 from app.scheduler.priority_queue import PriorityQueue, REDIS_PROCESSING_HASH_KEY
+from app.core.metrics import JOBS_RETRIED
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -128,6 +129,7 @@ class HeartbeatManager:
                         job.status = JobStatus.QUEUED
                         job.worker_id = None
                         job.started_at = None
+                        JOBS_RETRIED.labels(job_type=job.job_type).inc()
                         await pq.enqueue(str(job.id), priority=job.priority)
                         requeued_jobs.append(str(job.id))
                         logger.warning(

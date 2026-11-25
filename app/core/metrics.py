@@ -36,6 +36,12 @@ JOBS_COMPLETED = Counter(
     ["job_type", "status"],
 )
 
+JOBS_RETRIED = Counter(
+    "task_engine_jobs_retried_total",
+    "Total number of job retry attempts scheduled",
+    ["job_type"],
+)
+
 # 4. Latency histograms (p50 / p95 / p99 precision)
 JOB_EXECUTION_DURATION = Histogram(
     "task_engine_job_execution_duration_seconds",

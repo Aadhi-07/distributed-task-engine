@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "task-engine-api"
+    metrics_path: "/metrics"
+    static_configs:
+      # task-engine-api:10000 is Render's private-network hostname for the API web service
+      - targets: ["task-engine-api:10000"]
