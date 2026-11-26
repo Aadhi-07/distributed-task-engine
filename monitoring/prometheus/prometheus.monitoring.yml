@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "render-task-engine-api"
+    scheme: "https"
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      # =========================================================================
+      # RENDER LIVE SCRAPE TARGET:
+      # Change this target if your Render deployment uses a different domain.
+      # Default: distributed-task-engine.onrender.com
+      # =========================================================================
+      - targets: ["distributed-task-engine.onrender.com"]
+        labels:
+          environment: "render-live"
+          service: "distributed-task-engine"

@@ -61,15 +61,15 @@ def test_database_url_sslmode_conversion():
 def test_render_database_and_redis_env_aliases():
     """Verifies that INTERNAL_DATABASE_URL, POSTGRES_URL, and INTERNAL_REDIS_URL are recognized."""
     # Test INTERNAL_DATABASE_URL
-    s1 = Settings(_env_file=None, INTERNAL_DATABASE_URL="postgres://user:pass@dpg-internal:5432/db1")
+    s1 = Settings(_env_file=None, DATABASE_URL=None, INTERNAL_DATABASE_URL="postgres://user:pass@dpg-internal:5432/db1")
     assert s1.async_database_url == "postgresql+asyncpg://user:pass@dpg-internal:5432/db1"
 
     # Test POSTGRES_URL
-    s2 = Settings(_env_file=None, POSTGRES_URL="postgresql://user:pass@dpg-internal:5432/db2")
+    s2 = Settings(_env_file=None, DATABASE_URL=None, POSTGRES_URL="postgresql://user:pass@dpg-internal:5432/db2")
     assert s2.async_database_url == "postgresql+asyncpg://user:pass@dpg-internal:5432/db2"
 
     # Test INTERNAL_REDIS_URL
-    s3 = Settings(_env_file=None, INTERNAL_REDIS_URL="redis://red-internal:6379")
+    s3 = Settings(_env_file=None, REDIS_URL=None, INTERNAL_REDIS_URL="redis://red-internal:6379")
     assert s3.redis_connection_url == "redis://red-internal:6379"
 
 

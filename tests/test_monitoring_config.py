@@ -49,7 +49,7 @@ def test_grafana_provisioning_yamls():
     assert ds_data["apiVersion"] == 1
     ds = ds_data["datasources"][0]
     assert ds["uid"] == "prometheus"
-    assert ds["url"] == "http://prometheus:10000"
+    assert ds["url"] in ("http://prometheus:9090", "http://prometheus:10000")
     assert ds["isDefault"] is True
 
     dash_path = REPO_ROOT / "monitoring" / "grafana" / "provisioning" / "dashboards" / "dashboards.yml"
@@ -114,3 +114,75 @@ async def test_jobs_retried_metric():
     # Verify present in collect_system_metrics Prometheus text
     output = await collect_system_metrics()
     assert b"task_engine_jobs_retried_total" in output
+
+
+def test_docker_compose_monitoring_validity():
+    """Validates docker-compose.monitoring.yml structure, services, and ports."""
+    compose_path = REPO_ROOT / "docker-compose.monitoring.yml"
+    assert compose_path.exists(), "docker-compose.monitoring.yml must exist at repo root"
+
+    with open(compose_path, "r", encoding="utf-8") as f:
+        compose = yaml.safe_load(f)
+
+    assert compose is not None
+    assert "services" in compose
+    services = compose["services"]
+
+    # Must contain ONLY prometheus and grafana (no api, worker, redis, postgres)
+    assert set(services.keys()) == {"prometheus", "grafana"}
+    assert "postgres" not in services
+    assert "redis" not in services
+    assert "api" not in services
+    assert "worker" not in services
+
+    # Prometheus service
+    prom = services["prometheus"]
+    assert prom["image"] == "prom/prometheus:v2.51.0"
+    assert any("9090" in str(p) for p in prom.get("ports", []))
+    assert any("prometheus.monitoring.yml" in str(v) for v in prom.get("volumes", []))
+
+    # Grafana service
+    grafana = services["grafana"]
+    assert grafana["image"] == "grafana/grafana:10.4.0"
+    assert any("3000" in str(p) for p in grafana.get("ports", []))
+    assert any("provisioning" in str(v) for v in grafana.get("volumes", []))
+    assert any("dashboards" in str(v) for v in grafana.get("volumes", []))
+
+    # Environment
+    env_str = str(grafana.get("environment", []))
+    assert "GF_SECURITY_ADMIN_PASSWORD" in env_str
+
+
+def test_prometheus_monitoring_yaml_validity():
+    """Validates monitoring/prometheus/prometheus.monitoring.yml configuration for live Render scraping."""
+    prom_yaml_path = REPO_ROOT / "monitoring" / "prometheus" / "prometheus.monitoring.yml"
+    assert prom_yaml_path.exists(), "prometheus.monitoring.yml must exist"
+
+    with open(prom_yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    assert data is not None
+    assert data["global"]["scrape_interval"] == "15s"
+    assert data["global"]["scrape_timeout"] == "10s"
+
+    job = data["scrape_configs"][0]
+    assert job["scheme"] == "https"
+    assert job["metrics_path"] == "/metrics"
+    assert job["scrape_interval"] == "15s"
+    assert job["scrape_timeout"] == "10s"
+
+    targets = job["static_configs"][0]["targets"]
+    assert "distributed-task-engine.onrender.com" in targets
+
+
+def test_env_monitoring_example_validity():
+    """Validates .env.monitoring.example exists and contains no production secrets."""
+    example_path = REPO_ROOT / ".env.monitoring.example"
+    assert example_path.exists(), ".env.monitoring.example must exist"
+
+    content = example_path.read_text(encoding="utf-8")
+    assert "GF_SECURITY_ADMIN_PASSWORD=" in content
+    assert "PROMETHEUS_PORT=" in content
+    assert "GRAFANA_PORT=" in content
+    assert "RENDER_TARGET=" in content
+

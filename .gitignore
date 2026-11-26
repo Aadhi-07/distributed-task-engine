@@ -43,6 +43,7 @@ htmlcov/
 # Environment & credentials
 .env
 .env.local
+.env.monitoring
 *.local.db
 *.sqlite3
 
