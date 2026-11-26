@@ -82,6 +82,7 @@ def test_grafana_task_engine_dashboard_json():
     allowed_metric_names = {
         "task_engine_queue_depth",
         "task_engine_active_workers_count",
+        "task_engine_jobs_by_status",
         "task_engine_jobs_submitted_total",
         "task_engine_jobs_completed_total",
         "task_engine_jobs_retried_total",
