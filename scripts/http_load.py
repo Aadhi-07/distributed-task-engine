@@ -64,7 +64,7 @@ async def run_load_test(
         headers["X-API-Key"] = api_key
 
     # Validate endpoint health
-    async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
         try:
             health_resp = await client.get("/health/live")
             if health_resp.status_code != 200:

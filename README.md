@@ -454,6 +454,77 @@ python scripts/http_load.py \
 
 ---
 
+## Monitor the live Render deployment
+
+Run a lightweight Prometheus and Grafana monitoring stack **locally on your laptop** in Docker to observe your live Render deployment (`https://distributed-task-engine.onrender.com`) in real-time.
+
+> [!NOTE]
+> **Laptop Execution & Zero Render Resource Usage**:
+> The monitoring stack runs entirely on your local machine using `docker-compose.monitoring.yml`. It consumes zero RAM, CPU, or dyno slots on Render.
+
+> [!TIP]
+> **Keeps Free Instances Awake**:
+> Prometheus polls the live Render endpoint (`/metrics`) over HTTPS every 15 seconds with a 10s timeout. This continuous traffic prevents Render's free web service from sleeping due to inactivity while Prometheus is running.
+
+### Commands
+
+1. **Configure Environment**:
+   ```bash
+   cp .env.monitoring.example .env.monitoring
+   ```
+   *(Optionally customize `GF_SECURITY_ADMIN_PASSWORD`, `PROMETHEUS_PORT=9090`, `GRAFANA_PORT=3000`, or `RENDER_TARGET`)*
+
+2. **Start the Local Monitoring Stack**:
+   ```bash
+   docker compose -f docker-compose.monitoring.yml up -d
+   ```
+
+3. **Verify Prometheus Scrape Target**:
+   - Open [http://localhost:9090/targets](http://localhost:9090/targets) in your browser.
+   - Confirm target `https://distributed-task-engine.onrender.com/metrics` shows state **UP** (1/1 up).
+
+4. **Open the Grafana Dashboard**:
+   - Navigate to [http://localhost:3000](http://localhost:3000).
+   - Log in with username `admin` and password `admin` (or the value set in `GF_SECURITY_ADMIN_PASSWORD`).
+   - Open **Dashboards** -> **Distributed Task Engine**. The pre-provisioned dark dashboard loads immediately with 5s auto-refresh.
+
+5. **Generate Live Workload**:
+   In another terminal, submit benchmark workloads to the live deployment:
+   ```bash
+   python scripts/http_load.py \
+     --base-url https://distributed-task-engine.onrender.com \
+     --jobs 50 \
+     --concurrency 10
+   ```
+   The script submits 50 mixed-priority workloads (`model_inference`, `batch_scoring`, `model_training`, `sleep`), monitors them until completion, and outputs live throughput, failure rates, and percentiles.
+
+6. **Stop the Monitoring Stack**:
+   ```bash
+   docker compose -f docker-compose.monitoring.yml down
+   ```
+
+---
+
+### Dashboard Panels & Metrics Reference
+
+The Grafana dashboard visualizes cluster state computed directly from Redis and PostgreSQL:
+
+| Panel | Metric / PromQL Query | Semantic Description |
+| :--- | :--- | :--- |
+| **Active Workers** | `task_engine_active_workers_count` | Number of healthy worker daemons actively heartbeating in Redis (`task_engine:workers:heartbeats`) within the last 15 seconds. |
+| **Priority Queue Depth** | `task_engine_queue_depth{queue="priority"}` | Number of jobs waiting to be dequeued in Redis priority ZSET (`task_engine:queue:priority`), scored by `(9-P)*1e9 + ts`. |
+| **Running Jobs (In-Flight)** | `task_engine_running_jobs` | Exact count of jobs concurrently being executed across the worker fleet, computed live from PostgreSQL (`status = 'RUNNING'`). |
+| **Delayed Retries Queue** | `task_engine_queue_depth{queue="delayed"}` | Number of transiently failed jobs waiting for exponential backoff delay expiration before re-enqueueing. |
+| **Dead Letter Queue (DLQ)** | `task_engine_queue_depth{queue="dlq"}` | Cumulative count of poisoned or unrecoverable jobs that exhausted `max_retries`. |
+| **Failure Rate (5m)** | `(sum(rate(task_engine_jobs_completed_total{status="FAILED"}[5m])) / (sum(rate(task_engine_jobs_completed_total[5m])) > 0)) * 100` | Percentage of terminal jobs that failed over the rolling 5-minute window. |
+| **Throughput (Jobs / sec)** | `sum(rate(task_engine_jobs_completed_total[1m]))`<br>`sum(rate(task_engine_jobs_submitted_total[1m]))` | Real-time ingestion rate vs completion rate, highlighting cluster capacity saturation. |
+| **Execution Duration Quantiles** | `histogram_quantile(0.50/0.95/0.99, sum(rate(task_engine_job_execution_duration_seconds_bucket[5m])) by (le))` | P50, P95, and P99 latency percentiles of actual task execution times (observed from `job_attempts.execution_duration_ms`). |
+| **Queue Depths Over Time** | `task_engine_queue_depth` | Multi-series area chart tracking backlog evolution across priority, delayed, and DLQ queues. |
+| **Scheduled Retries Rate** | `sum(rate(task_engine_jobs_retried_total[1m]))` | Rate of automatic retry attempts scheduled per second. |
+| **Jobs Completed by Status** | `sum by (status) (task_engine_jobs_completed_total)` | Stacked timeseries showing total completed tasks partitioned by terminal status (`SUCCEEDED`, `FAILED`, `DEAD`). |
+
+---
+
 ## Testing & Quality Assurance
 
 Run the complete test suite:
