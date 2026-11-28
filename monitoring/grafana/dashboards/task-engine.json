@@ -289,7 +289,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(task_engine_jobs_completed_total{status=\"FAILED\"}[5m])) / (sum(rate(task_engine_jobs_completed_total[5m])) > 0)) * 100 or vector(0)",
+          "expr": "(sum(rate(task_engine_db_jobs_completed_total{status=~\"FAILED|DEAD\"}[5m])) / (sum(rate(task_engine_db_jobs_completed_total[5m])) > 0)) * 100 or vector(0)",
           "legendFormat": "Failure Rate",
           "range": true,
           "refId": "A"
@@ -329,7 +329,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum(rate(task_engine_jobs_completed_total[1m]))",
+          "expr": "sum(rate(task_engine_db_jobs_completed_total[1m]))",
           "legendFormat": "Jobs Completed / sec",
           "range": true,
           "refId": "A"
@@ -370,7 +370,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum(rate(task_engine_job_execution_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(task_engine_db_job_execution_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p50 Execution Latency",
           "range": true,
           "refId": "A"
@@ -378,7 +378,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(task_engine_job_execution_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(task_engine_db_job_execution_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95 Execution Latency",
           "range": true,
           "refId": "B"
@@ -386,7 +386,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(task_engine_job_execution_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(task_engine_db_job_execution_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p99 Execution Latency",
           "range": true,
           "refId": "C"
@@ -492,7 +492,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum by (status) (task_engine_jobs_completed_total)",
+          "expr": "sum by (status) (task_engine_db_jobs_completed_total)",
           "legendFormat": "Status: {{status}}",
           "range": true,
           "refId": "A"

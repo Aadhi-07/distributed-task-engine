@@ -116,18 +116,18 @@ async def test_request_id_header_and_correlation(async_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_live_collector_computes_metrics_from_postgres_and_redis(async_client: AsyncClient):
-    """Verifies that the API /metrics collector computes gauges, completed counters,
-    retries, and execution latency from Postgres and Redis even when jobs are processed out-of-process.
+    """Verifies that the API /metrics custom collector computes completed counts,
+    retries, running jobs, and execution duration histogram from Postgres and Redis.
     """
     import uuid
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from app.models.job import Job, JobAttempt, JobStatus, AttemptStatus
 
     session_factory = get_session_factory()
-    redis = await get_redis()
 
-    # Seed mock multi-process state directly into Postgres (simulating independent worker instances)
+    # Seed multi-process state directly into Postgres (simulating independent worker instances)
     unique_type = f"test_bg_{uuid.uuid4().hex[:6]}"
+    t0 = datetime.now(timezone.utc)
     async with session_factory() as session:
         # 1. Concurrently running job
         running_job = Job(
@@ -139,7 +139,7 @@ async def test_live_collector_computes_metrics_from_postgres_and_redis(async_cli
         )
         session.add(running_job)
 
-        # 2. Succeeded job with recorded attempt execution duration
+        # 2. Succeeded job with recorded attempt started_at / finished_at
         succeeded_job = Job(
             id=uuid.uuid4(),
             job_type=unique_type,
@@ -155,9 +155,9 @@ async def test_live_collector_computes_metrics_from_postgres_and_redis(async_cli
             attempt_number=1,
             worker_id="remote-worker-xyz",
             status=AttemptStatus.SUCCEEDED,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-            execution_duration_ms=175.5,
+            started_at=t0,
+            finished_at=t0 + timedelta(milliseconds=175),
+            execution_duration_ms=175.0,
         )
         session.add(attempt)
 
@@ -179,19 +179,139 @@ async def test_live_collector_computes_metrics_from_postgres_and_redis(async_cli
     assert res.status_code == 200
     metrics_text = res.text
 
-    # Verify status gauge
+    # Verify status gauge and running jobs gauge
     assert 'task_engine_jobs_by_status{status="RUNNING"}' in metrics_text
     assert 'task_engine_jobs_by_status{status="SUCCEEDED"}' in metrics_text
-
-    # Verify running jobs gauge reflects the running job
     assert "task_engine_running_jobs" in metrics_text
 
-    # Verify completed counter reflects the succeeded job from DB
-    assert f'task_engine_jobs_completed_total{{job_type="{unique_type}",status="SUCCEEDED"}}' in metrics_text
+    # Verify custom collector monotonic completed counter by status
+    assert 'task_engine_db_jobs_completed_total{status="SUCCEEDED"}' in metrics_text
+    assert 'task_engine_db_jobs_completed_total{status="FAILED"}' in metrics_text
 
     # Verify retried counter reflects retry_count from DB
     assert f'task_engine_jobs_retried_total{{job_type="{unique_type}"}}' in metrics_text
 
-    # Verify execution latency histogram observed the attempt duration
-    assert f'task_engine_job_execution_duration_seconds_count{{job_type="{unique_type}"}}' in metrics_text
+    # Verify custom collector execution duration histogram built from started_at/finished_at
+    assert "task_engine_db_job_execution_duration_seconds_bucket" in metrics_text
+    assert "task_engine_db_job_execution_duration_seconds_count" in metrics_text
+    assert "task_engine_db_job_execution_duration_seconds_sum" in metrics_text
+
+
+@pytest.mark.asyncio
+async def test_postgres_collector_5s_cache_prevents_repeated_db_queries():
+    """Verifies that PostgresMetricsCollector caches DB results for ~5 seconds across scrapes."""
+    from unittest.mock import AsyncMock
+    from prometheus_client import CollectorRegistry, generate_latest
+    from app.core.metrics import PostgresMetricsCollector
+
+    collector = PostgresMetricsCollector(cache_ttl_seconds=5.0)
+    registry = CollectorRegistry()
+    registry.register(collector)
+
+    session_factory = get_session_factory()
+    async with session_factory() as real_session:
+        execute_calls = 0
+        orig_execute = real_session.execute
+
+        async def counted_execute(*args, **kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            return await orig_execute(*args, **kwargs)
+
+        real_session.execute = counted_execute  # type: ignore[method-assign]
+
+        # First refresh hits DB
+        await collector.refresh(real_session)
+        first_calls = execute_calls
+        assert first_calls == 3  # status, retry, attempts
+
+        # Second refresh within 5s uses cache (0 new DB queries)
+        await collector.refresh(real_session)
+        assert execute_calls == first_calls
+
+        # Generate Prometheus text from cache
+        output = generate_latest(registry).decode("utf-8")
+        assert "task_engine_db_jobs_completed_total" in output
+        assert "task_engine_db_job_execution_duration_seconds_bucket" in output
+
+        # After cache invalidation (or TTL expiry), DB is queried again
+        collector.invalidate_cache()
+        await collector.refresh(real_session)
+        assert execute_calls == first_calls * 2
+
+
+@pytest.mark.asyncio
+async def test_postgres_collector_histogram_buckets_from_attempt_timestamps():
+    """Verifies histogram bucket placement and sum from job_attempts started_at/finished_at."""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+    from prometheus_client import CollectorRegistry, generate_latest
+    from app.core.metrics import PostgresMetricsCollector
+    from app.models.job import Job, JobAttempt, JobStatus, AttemptStatus
+
+    collector = PostgresMetricsCollector(cache_ttl_seconds=5.0)
+    registry = CollectorRegistry()
+    registry.register(collector)
+
+    session_factory = get_session_factory()
+    base_ts = datetime.now(timezone.utc)
+
+    async with session_factory() as session:
+        job = Job(
+            id=uuid.uuid4(),
+            job_type="hist_test",
+            status=JobStatus.SUCCEEDED,
+            priority=5,
+            payload={},
+        )
+        session.add(job)
+        # Attempt 1: 0.02s (falls in le=0.025 and above)
+        session.add(
+            JobAttempt(
+                id=uuid.uuid4(),
+                job_id=job.id,
+                attempt_number=1,
+                worker_id="w-1",
+                status=AttemptStatus.SUCCEEDED,
+                started_at=base_ts,
+                finished_at=base_ts + timedelta(milliseconds=20),
+            )
+        )
+        # Attempt 2: 0.40s (falls in le=0.5 and above)
+        session.add(
+            JobAttempt(
+                id=uuid.uuid4(),
+                job_id=job.id,
+                attempt_number=2,
+                worker_id="w-1",
+                status=AttemptStatus.SUCCEEDED,
+                started_at=base_ts,
+                finished_at=base_ts + timedelta(milliseconds=400),
+            )
+        )
+        await session.commit()
+
+        await collector.refresh(session, force=True)
+
+    output = generate_latest(registry).decode("utf-8")
+    # Check count >= 2 and cumulative buckets behave monotonically
+    assert 'task_engine_db_job_execution_duration_seconds_bucket{le="0.025"}' in output
+    assert 'task_engine_db_job_execution_duration_seconds_bucket{le="0.5"}' in output
+    assert 'task_engine_db_job_execution_duration_seconds_bucket{le="+Inf"}' in output
+
+
+def test_http_load_missing_timestamps_returns_none_for_na():
+    """Verifies scripts/http_load.py returns None (printed as 'n/a') when timestamps are missing."""
+    from scripts.http_load import calculate_percentile, extract_execution_duration_ms
+
+    assert calculate_percentile([], 50) is None
+    assert extract_execution_duration_ms({"status": "SUCCEEDED"}) is None
+    assert extract_execution_duration_ms({"started_at": None, "finished_at": None}) is None
+
+    dur = extract_execution_duration_ms({
+        "started_at": "2026-11-28T10:00:00+00:00",
+        "finished_at": "2026-11-28T10:00:01.500000+00:00",
+    })
+    assert dur == pytest.approx(1500.0)
+
 

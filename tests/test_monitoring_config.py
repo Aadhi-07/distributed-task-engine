@@ -85,8 +85,10 @@ def test_grafana_task_engine_dashboard_json():
         "task_engine_jobs_by_status",
         "task_engine_jobs_submitted_total",
         "task_engine_jobs_completed_total",
+        "task_engine_db_jobs_completed_total",
         "task_engine_jobs_retried_total",
         "task_engine_job_execution_duration_seconds",
+        "task_engine_db_job_execution_duration_seconds",
         "task_engine_job_scheduling_latency_seconds",
         "task_engine_running_jobs",
     }

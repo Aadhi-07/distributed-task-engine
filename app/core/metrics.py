@@ -1,5 +1,7 @@
+import asyncio
+from dataclasses import dataclass
 import time
-from typing import Optional, Set
+from typing import Dict, List, Optional, Tuple
 from prometheus_client import (
     Counter,
     Gauge,
@@ -8,9 +10,16 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     REGISTRY,
 )
+from prometheus_client.core import CounterMetricFamily, HistogramMetricFamily
 from redis.asyncio import Redis
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Fixed buckets for execution duration histogram (in seconds)
+EXECUTION_DURATION_BUCKETS: Tuple[float, ...] = (
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0
+)
+TERMINAL_JOB_STATUSES: Tuple[str, ...] = ("SUCCEEDED", "FAILED", "DEAD", "CANCELLED")
 
 # 1. Queue depth metrics
 QUEUE_DEPTH = Gauge(
@@ -56,7 +65,7 @@ JOB_EXECUTION_DURATION = Histogram(
     "task_engine_job_execution_duration_seconds",
     "Execution duration of tasks in seconds",
     ["job_type"],
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+    buckets=EXECUTION_DURATION_BUCKETS,
 )
 
 JOB_SCHEDULING_LATENCY = Histogram(
@@ -72,18 +81,181 @@ RUNNING_JOBS = Gauge(
     "Current number of concurrently executing jobs",
 )
 
-_observed_attempt_ids: Set[str] = set()
+
+@dataclass
+class _DbMetricsSnapshot:
+    completed_by_status: Dict[str, int]
+    status_totals: Dict[str, int]
+    running_count: int
+    submitted_by_type: Dict[str, int]
+    retried_by_type: Dict[str, int]
+    duration_buckets: List[Tuple[str, int]]
+    duration_sum: float
+
+
+class PostgresMetricsCollector:
+    """Custom Prometheus collector computing monotonic completed job counts and
+    execution duration histograms directly from PostgreSQL with a short TTL cache.
+    """
+
+    def __init__(self, cache_ttl_seconds: float = 5.0) -> None:
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self._snapshot: Optional[_DbMetricsSnapshot] = None
+        self._last_refresh_ts: float = 0.0
+        self._lock = asyncio.Lock()
+
+    def invalidate_cache(self) -> None:
+        """Clears the cached snapshot so the next refresh queries PostgreSQL."""
+        self._snapshot = None
+        self._last_refresh_ts = 0.0
+
+    def _is_cache_valid(self) -> bool:
+        return (
+            self._snapshot is not None
+            and (time.monotonic() - self._last_refresh_ts) < self.cache_ttl_seconds
+        )
+
+    async def refresh(self, session: AsyncSession, force: bool = False) -> None:
+        """Refreshes cached database metrics if the cache TTL has expired."""
+        if not force and self._is_cache_valid():
+            return
+
+        async with self._lock:
+            if not force and self._is_cache_valid():
+                return
+
+            from app.models.job import Job, JobAttempt, JobStatus
+
+            # 1. Job counts by status and job_type
+            status_stmt = select(Job.status, Job.job_type, func.count(Job.id)).group_by(
+                Job.status, Job.job_type
+            )
+            status_res = await session.execute(status_stmt)
+            status_rows = status_res.all()
+
+            running_count = 0
+            status_totals: Dict[str, int] = {st.value: 0 for st in JobStatus}
+            completed_by_status: Dict[str, int] = {st: 0 for st in TERMINAL_JOB_STATUSES}
+            submitted_by_type: Dict[str, int] = {}
+
+            for st, jtype, count in status_rows:
+                status_val = st.value if hasattr(st, "value") else str(st)
+                cnt_int = int(count)
+                status_totals[status_val] = status_totals.get(status_val, 0) + cnt_int
+                submitted_by_type[jtype] = submitted_by_type.get(jtype, 0) + cnt_int
+
+                if status_val == JobStatus.RUNNING.value:
+                    running_count += cnt_int
+                if status_val in completed_by_status:
+                    completed_by_status[status_val] += cnt_int
+
+            # 2. Retry counts by job_type
+            retry_stmt = select(
+                Job.job_type, func.coalesce(func.sum(Job.retry_count), 0)
+            ).group_by(Job.job_type)
+            retry_res = await session.execute(retry_stmt)
+            retried_by_type: Dict[str, int] = {
+                jtype: int(retries) for jtype, retries in retry_res.all()
+            }
+
+            # 3. Execution duration histogram from job_attempts started_at/finished_at
+            attempts_stmt = select(
+                JobAttempt.started_at, JobAttempt.finished_at
+            ).where(
+                JobAttempt.started_at.isnot(None),
+                JobAttempt.finished_at.isnot(None),
+            )
+            attempts_res = await session.execute(attempts_stmt)
+
+            bucket_counts = [0] * len(EXECUTION_DURATION_BUCKETS)
+            inf_count = 0
+            duration_sum = 0.0
+
+            for started_at, finished_at in attempts_res.all():
+                if started_at is None or finished_at is None:
+                    continue
+                dur_sec = max(0.0, (finished_at - started_at).total_seconds())
+                duration_sum += dur_sec
+                inf_count += 1
+                for idx, bound in enumerate(EXECUTION_DURATION_BUCKETS):
+                    if dur_sec <= bound:
+                        bucket_counts[idx] += 1
+
+            duration_buckets: List[Tuple[str, int]] = [
+                (str(bound), bucket_counts[idx])
+                for idx, bound in enumerate(EXECUTION_DURATION_BUCKETS)
+            ] + [("+Inf", inf_count)]
+
+            self._snapshot = _DbMetricsSnapshot(
+                completed_by_status=completed_by_status,
+                status_totals=status_totals,
+                running_count=running_count,
+                submitted_by_type=submitted_by_type,
+                retried_by_type=retried_by_type,
+                duration_buckets=duration_buckets,
+                duration_sum=duration_sum,
+            )
+            self._last_refresh_ts = time.monotonic()
+
+            # Sync auxiliary gauges/counters on REGISTRY
+            for st_val, cnt in status_totals.items():
+                JOBS_BY_STATUS.labels(status=st_val).set(cnt)
+            RUNNING_JOBS.set(running_count)
+
+            for jtype, count in submitted_by_type.items():
+                current = JOBS_SUBMITTED.labels(job_type=jtype)._value.get()
+                delta = count - current
+                if delta > 0:
+                    JOBS_SUBMITTED.labels(job_type=jtype).inc(delta)
+
+            for jtype, retries_int in retried_by_type.items():
+                current = JOBS_RETRIED.labels(job_type=jtype)._value.get()
+                delta = retries_int - current
+                if delta > 0:
+                    JOBS_RETRIED.labels(job_type=jtype).inc(delta)
+
+    def collect(self):
+        """Yields Prometheus metric families from the cached PostgreSQL snapshot."""
+        completed_family = CounterMetricFamily(
+            "task_engine_db_jobs_completed",
+            "Total number of completed jobs by status computed from PostgreSQL",
+            labels=["status"],
+        )
+        duration_family = HistogramMetricFamily(
+            "task_engine_db_job_execution_duration_seconds",
+            "Execution duration of job attempts in seconds computed from PostgreSQL started_at/finished_at",
+            labels=[],
+        )
+
+        if self._snapshot is not None:
+            for status_val, cnt in self._snapshot.completed_by_status.items():
+                completed_family.add_metric([status_val], cnt)
+            duration_family.add_metric(
+                [],
+                buckets=self._snapshot.duration_buckets,
+                sum_value=self._snapshot.duration_sum,
+            )
+        else:
+            for status_val in TERMINAL_JOB_STATUSES:
+                completed_family.add_metric([status_val], 0)
+            empty_buckets = [(str(b), 0) for b in EXECUTION_DURATION_BUCKETS] + [("+Inf", 0)]
+            duration_family.add_metric([], buckets=empty_buckets, sum_value=0.0)
+
+        yield completed_family
+        yield duration_family
+
+
+postgres_collector = PostgresMetricsCollector(cache_ttl_seconds=5.0)
+REGISTRY.register(postgres_collector)
 
 
 async def collect_system_metrics(
     redis: Optional[Redis] = None,
     session: Optional[AsyncSession] = None,
 ) -> bytes:
-    """Refreshes live queue depths, worker counts, job statuses, and execution telemetry
-    from Redis and PostgreSQL before returning Prometheus formatted text.
+    """Refreshes live queue depths, worker counts, and cached PostgreSQL telemetry
+    before returning Prometheus formatted text.
     """
-    global _observed_attempt_ids
-
     # 1. Collect live Redis coordination metrics
     if redis is not None:
         try:
@@ -101,80 +273,10 @@ async def collect_system_metrics(
         except Exception:
             pass
 
-    # 2. Collect authoritative PostgreSQL cluster state
+    # 2. Refresh cached PostgreSQL custom collector snapshot
     if session is not None:
         try:
-            from app.models.job import Job, JobAttempt, JobStatus
-
-            # A. Jobs by status, running count, and completed / submitted counters
-            status_stmt = select(Job.status, Job.job_type, func.count(Job.id)).group_by(Job.status, Job.job_type)
-            status_res = await session.execute(status_stmt)
-            status_rows = status_res.all()
-
-            running_count = 0
-            status_totals = {st.value: 0 for st in JobStatus}
-            submitted_totals = {}
-
-            for st, jtype, count in status_rows:
-                status_val = st.value if hasattr(st, "value") else str(st)
-                status_totals[status_val] = status_totals.get(status_val, 0) + count
-                submitted_totals[jtype] = submitted_totals.get(jtype, 0) + count
-
-                if status_val == JobStatus.RUNNING.value:
-                    running_count += count
-
-                # Sync completed counter from terminal statuses
-                if status_val in ("SUCCEEDED", "FAILED", "DEAD"):
-                    current = JOBS_COMPLETED.labels(job_type=jtype, status=status_val)._value.get()
-                    delta = count - current
-                    if delta > 0:
-                        JOBS_COMPLETED.labels(job_type=jtype, status=status_val).inc(delta)
-
-            # Update status gauges and running jobs gauge
-            for st_val, cnt in status_totals.items():
-                JOBS_BY_STATUS.labels(status=st_val).set(cnt)
-            RUNNING_JOBS.set(running_count)
-
-            # Sync submitted counter
-            for jtype, count in submitted_totals.items():
-                current = JOBS_SUBMITTED.labels(job_type=jtype)._value.get()
-                delta = count - current
-                if delta > 0:
-                    JOBS_SUBMITTED.labels(job_type=jtype).inc(delta)
-
-            # B. Sync retried counter from retry_count
-            retry_stmt = select(Job.job_type, func.coalesce(func.sum(Job.retry_count), 0)).group_by(Job.job_type)
-            retry_res = await session.execute(retry_stmt)
-            for jtype, retries in retry_res.all():
-                retries_int = int(retries)
-                current = JOBS_RETRIED.labels(job_type=jtype)._value.get()
-                delta = retries_int - current
-                if delta > 0:
-                    JOBS_RETRIED.labels(job_type=jtype).inc(delta)
-
-            # C. Sync execution duration histogram from newly finished attempts
-            latency_stmt = (
-                select(Job.job_type, JobAttempt.execution_duration_ms, JobAttempt.id)
-                .join(Job, JobAttempt.job_id == Job.id)
-                .where(JobAttempt.execution_duration_ms.isnot(None))
-                .order_by(JobAttempt.started_at.desc())
-                .limit(200)
-            )
-            lat_res = await session.execute(latency_stmt)
-            new_attempts = []
-            for jtype, dur_ms, att_id in lat_res.all():
-                att_id_str = str(att_id)
-                if att_id_str not in _observed_attempt_ids:
-                    new_attempts.append((jtype, dur_ms, att_id_str))
-
-            for jtype, dur_ms, att_id_str in reversed(new_attempts):
-                _observed_attempt_ids.add(att_id_str)
-                JOB_EXECUTION_DURATION.labels(job_type=jtype).observe(dur_ms / 1000.0)
-
-            # Keep cache bounded
-            if len(_observed_attempt_ids) > 5000:
-                _observed_attempt_ids = set(list(_observed_attempt_ids)[-2500:])
-
+            await postgres_collector.refresh(session)
         except Exception:
             pass
 

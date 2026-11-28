@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import asyncio
+from datetime import datetime
 import math
 import sys
 import time
@@ -20,10 +21,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 
-def calculate_percentile(sorted_values: List[float], p: float) -> float:
-    """Calculates percentile from a sorted float array."""
+def calculate_percentile(sorted_values: List[float], p: float) -> Optional[float]:
+    """Calculates percentile from a sorted float array, or None if empty."""
     if not sorted_values:
-        return 0.0
+        return None
     k = (len(sorted_values) - 1) * (p / 100.0)
     f = math.floor(k)
     c = math.ceil(k)
@@ -32,6 +33,40 @@ def calculate_percentile(sorted_values: List[float], p: float) -> float:
     d0 = sorted_values[int(f)] * (c - k)
     d1 = sorted_values[int(c)] * (k - f)
     return round(d0 + d1, 2)
+
+
+def extract_execution_duration_ms(info: Dict[str, Any]) -> Optional[float]:
+    """Extracts real execution duration in ms from job timestamps or attempts, or None if missing."""
+    started_raw = info.get("started_at")
+    finished_raw = info.get("finished_at")
+    if started_raw and finished_raw:
+        try:
+            started_dt = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+            finished_dt = datetime.fromisoformat(finished_raw.replace("Z", "+00:00"))
+            return max(0.0, (finished_dt - started_dt).total_seconds() * 1000.0)
+        except ValueError:
+            pass
+
+    attempts = info.get("attempts") or []
+    if attempts:
+        last_att = attempts[-1]
+        att_dur = last_att.get("execution_duration_ms")
+        if att_dur is not None:
+            return float(att_dur)
+        att_start = last_att.get("started_at")
+        att_finish = last_att.get("finished_at")
+        if att_start and att_finish:
+            try:
+                s_dt = datetime.fromisoformat(att_start.replace("Z", "+00:00"))
+                f_dt = datetime.fromisoformat(att_finish.replace("Z", "+00:00"))
+                return max(0.0, (f_dt - s_dt).total_seconds() * 1000.0)
+            except ValueError:
+                pass
+
+    duration = info.get("execution_duration_ms")
+    if duration is not None:
+        return float(duration)
+    return None
 
 
 WORKLOAD_TEMPLATES = [
@@ -164,10 +199,9 @@ async def run_load_test(
         st = info.get("status", "UNKNOWN")
         status_counts[st] = status_counts.get(st, 0) + 1
 
-        # Use execution_duration_ms reported by backend if available, or client-measured
-        duration = info.get("execution_duration_ms")
-        if duration is not None and duration > 0:
-            execution_durations_ms.append(float(duration))
+        duration = extract_execution_duration_ms(info)
+        if duration is not None:
+            execution_durations_ms.append(duration)
 
     execution_durations_ms.sort()
     failed_count = status_counts.get("FAILED", 0) + status_counts.get("DEAD", 0)
@@ -177,6 +211,10 @@ async def run_load_test(
     p50_ms = calculate_percentile(execution_durations_ms, 50)
     p95_ms = calculate_percentile(execution_durations_ms, 95)
     p99_ms = calculate_percentile(execution_durations_ms, 99)
+
+    p50_str = f"{p50_ms:.1f} ms" if p50_ms is not None else "n/a"
+    p95_str = f"{p95_ms:.1f} ms" if p95_ms is not None else "n/a"
+    p99_str = f"{p99_ms:.1f} ms" if p99_ms is not None else "n/a"
 
     # 4. Display Results
     print("\n" + "=" * 70)
@@ -192,9 +230,9 @@ async def run_load_test(
     print(f"Failure Rate:            {failure_rate:.1f}%")
     print("-" * 70)
     print("Execution Latency Percentiles (Worker Task Duration):")
-    print(f"  \u2022 p50 Latency:           {p50_ms:.1f} ms")
-    print(f"  \u2022 p95 Latency:           {p95_ms:.1f} ms")
-    print(f"  \u2022 p99 Latency:           {p99_ms:.1f} ms")
+    print(f"  \u2022 p50 Latency:           {p50_str}")
+    print(f"  \u2022 p95 Latency:           {p95_str}")
+    print(f"  \u2022 p99 Latency:           {p99_str}")
     print("=" * 70)
 
 
